@@ -4,6 +4,60 @@
 
 ---
 
+
+## Versión 19.0.26.56 — no rotar el token de MercadoLibre en bases de prueba (neutralizadas)
+1 jul 2026
+
+**Cambios:**
+
+1. **Las copias de prueba (staging/duplicados en Odoo.sh) ya no desconectan a producción.** Al duplicar
+   la base para un entorno de test, Odoo la marca como *neutralizada*. Hasta ahora el conector seguía
+   intentando **renovar el token** de MercadoLibre desde esa copia; como el token de renovación es rotativo
+   (un solo uso), cada renovación desde el test **invalidaba la sesión de producción** (y viceversa),
+   causando cortes intermitentes de conexión (401). Ahora una base neutralizada **nunca renueva el token**:
+   el entorno de prueba sigue leyendo con el token vigente hasta que expira y luego queda desconectado
+   (esperado en test), sin afectar a producción. _(Producción sin cambios de comportamiento.)_
+
+## Versión 26.55 — cupón ML: respeta la preferencia de facturación (modo de cupón configurable) [#433]
+30 jun 2026
+
+**Cambios:**
+
+1. **El cupón de MercadoLibre vuelve a respetar la configuración del cliente.** Una corrección previa
+   (#399) forzaba el descuento del cupón sobre el producto cuando el comprador pagaba el envío completo,
+   incluso con la opción de facturar-con-descuento **desactivada** — pisando la preferencia del vendedor
+   (regresión #433). Ahora el tratamiento del cupón depende **solo** del modo declarado en la cuenta.
+
+2. **Modo de facturación del cupón (tri-estado).** La antigua casilla pasa a un selector con tres modos:
+   - **Precio pleno** (por defecto, equivale a la casilla desactivada): la factura se emite por el precio
+     completo. Correcto cuando MercadoLibre reembolsa el cupón al vendedor (el ingreso gravado es el precio
+     pleno). *Ni el producto ni el envío llevan el descuento del cupón.*
+   - **Descuento en producto** (equivale a la casilla activada): el cupón se refleja como % de descuento
+     sobre las líneas de producto.
+   - **Línea de descuento separada** (opcional, avanzado): el cupón se imputa como línea(s) de descuento
+     aparte, una por grupo de impuesto, sin tocar producto ni envío. *Requiere validación fiscal previa.*
+
+   En todos los modos el total facturado sigue cuadrando con lo que corresponde cobrar. La migración deja a
+   cada cuenta en el modo equivalente a su configuración anterior (desactivada → Precio pleno; activada →
+   Descuento en producto).
+
+---
+
+## Versión 26.54 — alta automática de productos inexistentes al importar órdenes (sin frenar por permisos)
+30 jun 2026
+
+**Cambios:**
+
+1. **Productos nuevos al importar una orden:** cuando llega una orden de MercadoLibre cuyo producto aún no
+   existe en Odoo y la cuenta tiene activada *"Crear producto desde la orden"*, el sistema lo da de alta
+   automáticamente. Si el cron operaba a nombre del *Vendedor ML* (sin permiso para crear productos), esa
+   alta fallaba con un error de acceso y la orden quedaba sin importar. Ahora la creación y el vínculo del
+   producto corren con **privilegios de sistema** (es parte de la integración automática), de modo que la
+   orden se importa completa. Con la opción **desactivada** el comportamiento no cambia: el producto no se
+   crea y la incidencia se registra en el log sin abortar el resto de la importación.
+
+---
+
 ## Versión 26.48
 17 jun 2026
 
