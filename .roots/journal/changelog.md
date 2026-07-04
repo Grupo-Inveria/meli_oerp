@@ -5,6 +5,48 @@
 ---
 
 
+## Versión 19.0.26.60 — backfill "Traer medidas": resolución de cuentas overridable (multi-cuenta real) [#424 Deco/KPI]
+3 jul 2026
+
+**Cambios:**
+
+1. **El relleno de medidas ("Traer medidas") ahora funciona también en instalaciones con varias cuentas de
+   MercadoLibre.** La resolución de "de qué cuenta leer cada publicación" se hizo **extensible**: la versión
+   base sigue funcionando con una cuenta por compañía, y el módulo multi-cuenta (meli_oerp_multiple) la
+   completa para recorrer las cuentas reales. Sin este cambio, en instalaciones multi-cuenta el relleno no
+   encontraba credenciales y no completaba nada.
+
+
+## Versión 19.0.26.59 — fix del backfill "Traer medidas": corrige el error al ejecutarlo y soporta multi-cuenta [#424 Deco/KPI]
+3 jul 2026
+
+**Cambios:**
+
+1. **El botón "Traer medidas" / acción de lista ya no da error y funciona con varias cuentas de MercadoLibre.**
+   La acción de relleno (agregada en 26.58) fallaba al ejecutarse y, en cuentas con varios vendedores de ML
+   en la misma base (p. ej. 3 cuentas), intentaba leer cada publicación con el token de una sola cuenta →
+   error de permisos (403). Ahora cada publicación se lee con el token de **la cuenta que realmente la
+   posee** (se agrupan por cuenta para no repetir conexiones), y se completa correctamente. Sin cambios en
+   el mapeo de campos (que ya estaba OK).
+
+
+## Versión 19.0.26.57 — el IMPORT ML→Odoo trae las medidas del paquete y demás campos de la pestaña "MELI Plantilla" [#424 Deco/KPI]
+3 jul 2026
+
+**Cambios:**
+
+1. **Al importar un producto desde MercadoLibre ya se completan los campos de la pestaña "MercadoLibre / Plantilla".**
+   Antes, al traer un item de ML, la sección **"Dimensiones del paquete (Vendedor – Mercado Envíos)"**
+   (Alto/Ancho/Largo/Peso del paquete) y los campos **Marca**, **Modelo** y **Género** quedaban vacíos —
+   había que cargarlos a mano para poder **re-publicar** (Mercado Envíos exige las medidas del paquete).
+   Ahora el import lee esos datos del propio item de ML y los rellena automáticamente. Si ML no informa un
+   dato, **no se pisa** lo que hayas cargado a mano (es idempotente).
+2. **Nuevo botón "Traer medidas" y acción masiva** para los productos **ya importados** sin estos datos:
+   en la ficha del producto (pestaña MELI Plantilla) y como acción sobre la lista de productos, relee el
+   item de ML de cada producto con publicación y completa los campos faltantes. Procesa de a lotes de forma
+   segura: si un producto falla, el resto continúa.
+
+
 ## Versión 19.0.26.56 — no rotar el token de MercadoLibre en bases de prueba (neutralizadas)
 1 jul 2026
 

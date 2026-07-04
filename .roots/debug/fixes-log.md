@@ -5,6 +5,76 @@
 ---
 
 
+### 3 jul 2026 — refactor(backfill): resolución de cuentas a hooks overridables (v19.0.26.60) [#424 Deco/KPI 526]
+
+**Archivos:** `models/product.py` (`product.template`: nuevos hooks `_meli_backfill_get_accounts` + `_meli_backfill_list_ids`; `action_meli_backfill_template_fields` reescrito para usarlos).
+
+- **Contexto:** el backfill 26.59 enumeraba credenciales desde `res.company`
+  (`search([('mercadolibre_seller_id','!=',False)])`). En setups multi-cuenta (meli_oerp_multiple) las
+  compañías tienen `mercadolibre_seller_id`/token = False (los tokens viven en `mercadolibre.account`), así
+  que `meli_by_company` quedaba vacío → `return True` sin poblar nada (verificado en prod Deco: la query daba 0).
+- **Fix (base):** se extrajo la parte "enumerar cuentas ML logueadas" y "listar los meli_ids de cada cuenta"
+  a dos hooks overridables — `_meli_backfill_get_accounts()` (devuelve dicts `key`/`meli`/`company`/`source`)
+  y `_meli_backfill_list_ids(account)` (usa `source.fetch_list_meli_ids`, misma firma en res.company y en
+  mercadolibre.account). El loop (mapa `meli_id→cuenta`, fetch con el token correcto,
+  `_meli_import_template_attributes`, savepoint por producto) quedó igual y reusable. La base conserva el
+  comportamiento single-account (res.company) intacto.
+- **Override multi-cuenta:** en `meli_oerp_multiple` (26.60). Ver su fixes-log.
+
+
+### 3 jul 2026 — fix(backfill): action_meli_backfill_template_fields — meli_id en la variante + multi-cuenta (v19.0.26.59) [#424 Deco/KPI 526, verificado en prod Deco]
+
+**Archivos:** `models/product.py` (`product.template.action_meli_backfill_template_fields` reescrito; helper `product.template._meli_template_variant`), `views/product_view.xml` (filtro del `ir.actions.server`).
+
+- **BUG A — `meli_id` no existe en product.template (está en product.product/variante).** El backfill 26.58
+  hacía `self.filtered(lambda t: t.meli_id)`, `self.search([('meli_id','!=',False)])` y `template.meli_id`
+  sobre product.template → `ValueError: Invalid field product.template.meli_id`. El filtro del server action
+  (`records.filtered(lambda t: t.meli_id)`) rompía igual. **Fix:** resolver la variante con la publicación
+  vía `_meli_template_variant()` (`product_variant_ids.filtered("meli_id")[:1]`); el search sin `self` filtra
+  por `[('product_variant_ids.meli_id','!=',False)]`; el filtro del server action pasó a
+  `any(v.meli_id for v in t.product_variant_ids)`.
+- **BUG B — multi-cuenta: usaba un solo token (`env.user.company_id`).** En Deco hay 3 cuentas ML
+  (DECO/ECOMMARKET/DELTA), cada ítem pertenece a un seller distinto; leer `/items/<id>` con el token
+  equivocado da **403 access_denied** (verificado; con el token del seller dueño devuelve 200 y trae los
+  SELLER_PACKAGE_*). **Fix:** el token/cuenta se vive en `res.company` (`mercadolibre_seller_id` + tokens).
+  El backfill ahora: (1) arma un `meli.util` por cada compañía ML-configurada logueada
+  (`search([('mercadolibre_seller_id','!=',False)])`), (2) resuelve la compañía **dueña de cada ítem** con
+  un mapa `meli_id→company` construido perezosamente por cuenta vía `company.fetch_list_meli_ids(meli=...)`
+  (lista los items del propio seller — nunca pega a `/items` con el token ajeno), prefiriendo el
+  `template.company_id` del producto, y (3) hace el fetch con el token de esa cuenta. Se agrupa por cuenta
+  para no re-instanciar por ítem. Savepoint por producto + log de progreso se mantienen.
+- **Alcance:** solo el backfill (método + filtro del server action). El mapeo `_meli_import_template_attributes`
+  (import ML→Odoo) quedó intacto — verificado OK en prod Deco.
+- **Deploy:** re-deploy a Deco (kpi-mas/Deco produccion) lo hace el coordinador.
+
+
+### 3 jul 2026 — feat(import): ML→Odoo puebla los campos de la pestaña "MELI Plantilla" + backfill (v19.0.26.57) [#424 Deco/KPI 526, suite-wide]
+
+**Archivos:** `models/product.py` (product.product: `_MELI_IMPORT_ATTR_MAP` / `_MELI_IMPORT_ATTR_FALLBACK`, `_meli_attr_value`, `_meli_import_template_attributes`; llamada en `product_meli_get_product` tras escribir meli_fields/tmpl_fields; product.template: `action_meli_backfill_template_fields`), `views/product_view.xml` (botón "Traer medidas" en la pestaña MELI Plantilla + `ir.actions.server` `action_meli_backfill_template_fields_server` como acción de lista).
+
+- **Síntoma (Deco/KPI 526, #424):** al importar un item de ML los campos de la pestaña "MercadoLibre / Plantilla"
+  del product.template quedaban vacíos — en particular `meli_seller_package_height/width/length/weight` (Char),
+  y también `meli_brand`/`meli_model`/`meli_gender`. Solo se llenaban Categoría y Dominio. Dificultaba la re-publicación
+  (Mercado Envíos exige las dimensiones del paquete).
+- **Causa raíz:** existía el mapeo Odoo→ML (publish, construye atributos `SELLER_PACKAGE_*` y remapea catalog
+  `PACKAGE_*`→`SELLER_PACKAGE_*`), pero **faltaba el inverso** ML→Odoo en el import. Solo había un fragmento parcial
+  en la rama "sin variantes con SKU" de `product_meli_get_product`.
+- **Fix:** helper `_meli_import_template_attributes(product_template, rjson)` que recorre `rjson['attributes']` y mapea
+  `SELLER_PACKAGE_*`→`meli_seller_package_*` (con fallback a los catalog `PACKAGE_*`, misma relación que el publish, en
+  sentido inverso), y `BRAND`/`MODEL`/`GENDER`→`meli_brand`/`meli_model`/`meli_gender`. Value extraído de forma robusta
+  (`value_name` / `values[0].name` / `value_id`). Escribe en template y variante según exista el campo en cada uno
+  (`meli_gender` solo en template). **Idempotente:** solo escribe si ML trae valor no-vacío (no pisa carga manual).
+  Se llama en `product_meli_get_product` (cubre CREAR y ACTUALIZAR, ya que `product_template_update` delega ahí).
+  Se eliminó el fragmento parcial duplicado.
+- **Backfill:** `action_meli_backfill_template_fields` (product.template) relee cada item ML de los productos con
+  `meli_id` y completa los faltantes; **savepoint por producto** (un item que falla no aborta el lote) + log de progreso.
+  Expuesto como botón en el form y como `ir.actions.server` (acción de lista) sobre product.template.
+- **Alcance:** solo los Char (`meli_seller_package_*` + brand/model/gender) + backfill. Las dimensiones estructuradas
+  (value Float + uom por dimensión, para MRP) quedan para una FASE 2 aparte.
+- **Deploy:** pendiente a Deco (kpi-mas/Deco produccion). El cambio es en `product.py`/`product_view.xml`, NO en los 8
+  archivos del rescate proxy → port directo.
+
+
 ### 1 jul 2026 — fix(token): DB neutralizada no rota el refresh_token de ML (v19.0.26.56) [Deco/KPI 526, suite-wide]
 
 **Archivos:** `models/meli_util.py` (`meli.util`: helpers `_meli_is_neutralized` + `_meli_log_neutralized_skip`; guard en `get_new_instance`), `models/company.py` (`res.company.get_meli_state` early no-op).
