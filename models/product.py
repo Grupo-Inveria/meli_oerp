@@ -77,6 +77,35 @@ def _meli_short_permalink(meli_id):
     domain = _MELI_PRODUCT_DOMAINS.get(site, 'https://www.mercadolibre.com')
     return domain + '/' + site + '-' + meli_id[k:]
 
+
+def _meli_is_valid_gtin(code):
+    """¿`code` es un GTIN/EAN/UPC válido para MercadoLibre?
+
+    MercadoLibre acepta como Product Identifier (GTIN) sólo códigos GTIN-8,
+    UPC-A (12), EAN-13 (13) o GTIN-14: numéricos, de longitud 8/12/13/14 y con
+    dígito verificador correcto (módulo 10, GS1). Un SKU/código interno como
+    'C6536' NO es un GTIN → devuelve False y NO debe mandarse como GTIN.
+
+    100% defensivo: cualquier entrada no válida devuelve False.
+    """
+    if not code:
+        return False
+    try:
+        s = str(code).strip()
+        if not s.isdigit() or len(s) not in (8, 12, 13, 14):
+            return False
+        digits = [int(c) for c in s]
+        check = digits[-1]
+        body = digits[:-1]
+        # dígito verificador GS1: pesos 3/1 alternados desde la derecha del cuerpo
+        total = 0
+        for i, d in enumerate(reversed(body)):
+            total += d * (3 if i % 2 == 0 else 1)
+        expected = (10 - (total % 10)) % 10
+        return expected == check
+    except Exception:
+        return False
+
 class MyHTMLParser(HTMLParser):
 
     full_text = ""
@@ -282,22 +311,66 @@ class product_template(models.Model):
         """Hook: return the meli_id (str) list owned by `account` (an entry from
         _meli_backfill_get_accounts). Default uses the source record's
         fetch_list_meli_ids, defined with the same signature both on res.company
-        and on mercadolibre.account."""
+        and on mercadolibre.account. NOTE: no longer used by the backfill itself
+        (which now resolves ownership by direct per-item fetch, reliable on large
+        accounts); kept as an optional fallback / helper for callers that want a
+        seller's item list."""
         ids = account['source'].fetch_list_meli_ids(meli=account['meli']) or []
         return [str(m) for m in ids]
+
+    def _meli_backfill_fetch_item(self, meli, meli_id):
+        """Fetch a single ML item authenticated with `meli`'s token, proxy-safe.
+
+        Reuses the suite's meli.util instance (`meli.get`), which on clients with
+        the proxy rescue routes the request through their http_proxy -- do NOT
+        replace this with raw urllib. Returns the item dict on HTTP 200, or None
+        when the call fails / is denied (a foreign seller's token yields 403
+        access_denied, which we treat as "not this account")."""
+        try:
+            response = meli.get(
+                "/items/" + str(meli_id),
+                {'access_token': meli.access_token, 'include_attributes': 'all'},
+            )
+        except Exception as e:
+            _logger.debug("MELI backfill: fetch %s falló en transporte: %s", meli_id, e)
+            return None
+        if response is None:
+            return None
+        status = getattr(response, 'status_code', None)
+        if status is not None and status != 200:
+            return None
+        try:
+            rjson = response.json()
+        except Exception:
+            return None
+        if not isinstance(rjson, dict) or 'error' in rjson or not rjson.get('id'):
+            return None
+        return rjson
 
     def action_meli_backfill_template_fields(self):
         """Backfill the MELI "Plantilla" Char fields (seller package
         dimensions, brand, model, gender) for already-imported products by
-        re-reading their ML item. Multi-account aware: each item is fetched with
-        the token of the ACCOUNT that owns it (using the wrong seller's token
-        returns 403 access_denied). The set of accounts and how to list each
-        account's item ids come from the overridable _meli_backfill_get_accounts
-        / _meli_backfill_list_ids hooks (base = res.company; meli_oerp_multiple =
-        mercadolibre.account). Accounts are grouped so we don't re-instantiate
-        per item. Batch-safe: one savepoint per product so a failing item never
-        aborts the whole run. Idempotent (only fills from non-empty ML
-        attributes). Usable as a form button and a list action."""
+        re-reading their ML item.
+
+        DIRECT FETCH per item (no pre-scan). Each product's ML item is fetched
+        directly at /items/<meli_id>, probing the token of every logged-in ML
+        account (from the overridable _meli_backfill_get_accounts hook; base =
+        res.company, meli_oerp_multiple = mercadolibre.account) until one returns
+        HTTP 200 -- that is the OWNING account (a foreign seller's token yields
+        403 access_denied, so we move on to the next). This replaces the old
+        approach that resolved ownership by pre-scanning each seller's full item
+        list via fetch_list_meli_ids: on LARGE accounts (e.g. DECO ~20.8k items)
+        that paged listing does NOT cover every item, so many products were left
+        untouched. The direct fetch always reaches the item regardless of catalog
+        size (verified in prod on account 526 / item MLA1685903163).
+
+        The account that last answered OK is remembered and tried first, so a run
+        over one seller's catalog does not re-probe every account for each item;
+        the product's own company is preferred next (multi-company). Batch-safe:
+        one savepoint per product so a failing item never aborts the whole run.
+        Idempotent / overwrite semantics live in _meli_import_template_attributes
+        (SELLER_PACKAGE_* overwrite, brand/model/gender fill-empty). Usable as a
+        form button and a list action."""
         # meli_id lives on the variant (product.product), so filter templates by
         # their variants' meli_id (NOT template.meli_id, which does not exist).
         if self:
@@ -309,40 +382,30 @@ class product_template(models.Model):
         if not accounts:
             _logger.warning("MELI backfill: no hay cuentas ML logueadas; nada que hacer")
             return True
-        meli_by_key = {a['key']: a['meli'] for a in accounts}
 
-        # meli_id -> owning account key. Built lazily per account by listing each
-        # seller's own item ids (so we never hit /items with the wrong token).
-        owner_by_meli_id = {}
-        listed = set()
+        # Remember which account owned the previous item to try it first (items
+        # of one seller tend to come in runs); the product's own company is the
+        # next preference. No pre-scan of fetch_list_meli_ids here.
+        last_ok_key = [None]
 
-        def _list_account(a):
-            if a['key'] in listed:
-                return
-            listed.add(a['key'])
-            try:
-                ids = self._meli_backfill_list_ids(a) or []
-            except Exception as e:
-                _logger.warning("MELI backfill: no se pudieron listar items de '%s': %s", a['key'], e)
-                ids = []
-            for mid in ids:
-                owner_by_meli_id.setdefault(str(mid), a['key'])
-            _logger.info("MELI backfill: cuenta '%s' aporta %s items al mapa de propiedad", a['key'], len(ids))
+        def _ordered_accounts(template):
+            cand = template.company_id
 
-        def _resolve_meli(meli_id, template):
-            mid = str(meli_id)
-            if mid not in owner_by_meli_id:
-                # product's own company first (multi-company), then the rest.
-                cand = template.company_id
-                ordered = [a for a in accounts if cand and a.get('company') and a['company'].id == cand.id] + list(accounts)
-                for a in ordered:
-                    if a['key'] in listed:
-                        continue
-                    _list_account(a)
-                    if mid in owner_by_meli_id:
-                        break
-            key = owner_by_meli_id.get(mid)
-            return meli_by_key.get(key) if key else None
+            def _rank(a):
+                if last_ok_key[0] and a['key'] == last_ok_key[0]:
+                    return 0
+                if cand and a.get('company') and a['company'].id == cand.id:
+                    return 1
+                return 2
+            return sorted(accounts, key=_rank)
+
+        def _fetch_item(meli_id, template):
+            for a in _ordered_accounts(template):
+                rjson = self._meli_backfill_fetch_item(a['meli'], meli_id)
+                if rjson is not None:
+                    last_ok_key[0] = a['key']
+                    return rjson
+            return None
 
         total = len(templates)
         done = ok = errors = 0
@@ -355,16 +418,10 @@ class product_template(models.Model):
                 continue
             try:
                 with self.env.cr.savepoint():
-                    meli = _resolve_meli(meli_id, template)
-                    if not meli:
+                    rjson = _fetch_item(meli_id, template)
+                    if not rjson:
                         errors += 1
-                        _logger.warning("MELI backfill: item %s sin cuenta ML dueña resuelta, se omite", meli_id)
-                        continue
-                    response = meli.get("/items/" + str(meli_id), {'access_token': meli.access_token, 'include_attributes': 'all'})
-                    rjson = response and response.json()
-                    if not rjson or (isinstance(rjson, dict) and 'error' in rjson):
-                        errors += 1
-                        _logger.warning("MELI backfill: item %s unavailable: %s", meli_id, isinstance(rjson, dict) and rjson.get('error'))
+                        _logger.warning("MELI backfill: item %s no respondió 200 con ninguna cuenta ML, se omite", meli_id)
                         continue
                     variant._meli_import_template_attributes(template, rjson)
                     ok += 1
@@ -960,6 +1017,19 @@ class product_product(models.Model):
         "PACKAGE_LENGTH": "meli_seller_package_length",
         "PACKAGE_WEIGHT": "meli_seller_package_weight",
     }
+    # Fields where ML (SELLER_PACKAGE_*/PACKAGE_*) is the AUTHORITATIVE source:
+    # on import/backfill they OVERWRITE any pre-existing Odoo value whenever ML
+    # sends a non-empty one. This corrects legacy rows where an old process
+    # stored the product WIDTH/HEIGHT (e.g. '100 cm') in the package field
+    # instead of the real SELLER_PACKAGE_WIDTH ('10 cm'). The remaining mapped
+    # fields (brand/model/gender) stay fill-empty (may be manual). ML empty
+    # never wipes (guarded by `if not val: continue`).
+    _MELI_IMPORT_OVERWRITE_FIELDS = {
+        "meli_seller_package_height",
+        "meli_seller_package_width",
+        "meli_seller_package_length",
+        "meli_seller_package_weight",
+    }
 
     @staticmethod
     def _meli_attr_value(att):
@@ -985,8 +1055,17 @@ class product_product(models.Model):
         """ML->Odoo: populate the MELI "Plantilla" tab Char fields (seller
         package dimensions + BRAND/MODEL/GENDER) from the item `attributes`.
 
-        Idempotent: only writes when ML provides a non-empty value, so a value
-        loaded by hand in Odoo is never wiped by an empty ML attribute.
+        Write semantics (per field):
+          * Package dims (_MELI_IMPORT_OVERWRITE_FIELDS): ML SELLER_PACKAGE_* is
+            AUTHORITATIVE -> OVERWRITE the Odoo value whenever ML sends a
+            non-empty one (corrects legacy rows that stored the product
+            WIDTH/HEIGHT instead of the package measure).
+          * brand/model/gender: fill-empty (may be manual) -> only written when
+            the Odoo field is currently empty.
+        ML empty never wipes: a field is touched only when ML provides a
+        non-empty value. The catalog PACKAGE_* fallback applies only when no
+        SELLER_PACKAGE_* is present. Bare WIDTH/HEIGHT/LENGTH (the *product*
+        dimensions) are intentionally NOT mapped.
         Writes both the template and the variant (self) when the field exists
         on each. `self` may be an empty product.product recordset (then only
         the template is written)."""
@@ -1018,10 +1097,15 @@ class product_product(models.Model):
                 continue
             if is_primary:
                 seen_primary.add(field)
+            # Package dims: ML is authoritative -> overwrite. Others
+            # (brand/model/gender): fill-empty (do not clobber manual input).
+            overwrite = field in self._MELI_IMPORT_OVERWRITE_FIELDS
             if field in product_template._fields:
-                tmpl_vals[field] = val
+                if overwrite or not product_template[field]:
+                    tmpl_vals[field] = val
             if field in self._fields:
-                prod_vals[field] = val
+                if overwrite or not (self and self[field]):
+                    prod_vals[field] = val
         if tmpl_vals:
             product_template.write(tmpl_vals)
             _logger.info("MELI import: plantilla fields set on template %s: %s", product_template.id, list(tmpl_vals.keys()))
@@ -2334,8 +2418,8 @@ class product_product(models.Model):
 
         product.write( meli_fields )
         product_template.write( tmpl_fields )
-        # ML -> Odoo: populate MELI "Plantilla" tab fields from item attributes
-        # (seller package dimensions, brand, model, gender). Idempotent.
+        # ML -> Odoo: populate MELI "Plantilla" tab fields from item attributes.
+        # Package dims overwrite (ML authoritative); brand/model/gender fill-empty.
         product._meli_import_template_attributes( product_template, rjson )
         meli_available_quantity = rjson.get('available_quantity', 0)
         if (meli_available_quantity >=0):
@@ -3345,6 +3429,49 @@ class product_product(models.Model):
             if (variant_principal):
                 product.meli_id = variant_principal.meli_id
 
+    def _meli_category_requires_gtin( self, meli_category=None ):
+        """True si la categoría de ML exige el atributo GTIN (tag 'required').
+
+        Usa el catálogo YA importado `mercadolibre.category.attribute` (campo
+        `required`, poblado desde GET /categories/{cat}/attributes). No hace
+        llamadas a la API en runtime. 100% defensivo -> ante error asume False.
+        """
+        try:
+            meli_category = meli_category if meli_category is not None else self.meli_category
+            cat_id = meli_category and meli_category.meli_category_id
+            if not cat_id:
+                return False
+            att = self.env['mercadolibre.category.attribute'].sudo().search([
+                ('cat_id', '=', cat_id), ('att_id', '=', 'GTIN'), ('required', '=', True)
+            ], limit=1)
+            return bool(att)
+        except Exception:
+            _logger.exception("meli GTIN required check failed; assuming not required")
+            return False
+
+    def _meli_gtin_attribute( self, barcode, meli_category=None ):
+        """Decide, category-aware, si mandar el atributo GTIN a MercadoLibre.
+
+        Reglas:
+        - `barcode` es GTIN/EAN/UPC válido -> {'id':'GTIN','value_name': barcode}.
+        - `barcode` inválido/vacío + la categoría NO exige GTIN -> None (no se
+          envía; evita el 400 'Product Identifier [GTIN] invalid format' y permite
+          publicar productos cuyo barcode es en realidad un SKU interno).
+        - `barcode` inválido + la categoría SÍ exige GTIN -> None + warning LEGIBLE
+          (no se manda el SKU inválido; hay que cargar un EAN real). "Inventar" un
+          GTIN queda como last-resort explícito (opt-in), NUNCA por default.
+
+        Devuelve el dict del atributo, o None si no corresponde mandarlo.
+        """
+        if _meli_is_valid_gtin(barcode):
+            return { "id": "GTIN", "value_name": str(barcode).strip() }
+        if barcode and self._meli_category_requires_gtin(meli_category):
+            _logger.warning(
+                "MELI GTIN: la categoría exige un GTIN/EAN válido, pero el código '%s' no lo es "
+                "(parece un SKU/código interno). No se envía como GTIN; cargá un EAN/GTIN real "
+                "para poder publicar en esta categoría.", barcode)
+        return None
+
     #Add/Update SELLER_SKU attribute, only if present in Odoo, also can update GTIN (barcode)
     def _update_sku_attribute( self, attributes=[], set_sku=True, set_barcode=True, var_info = [] ):
 
@@ -3363,7 +3490,8 @@ class product_product(models.Model):
 
             elif (set_barcode and "id" in att and att["id"]=="GTIN" and variant.barcode):
                 barcode_updated = True
-                att = { "id": att["id"], "value_name": variant.barcode }
+                # category-aware: solo mandar GTIN si es un EAN/GTIN válido (no un SKU)
+                att = variant._meli_gtin_attribute(variant.barcode, variant.meli_category)
 
             #no duplicar row id
             if att and "id" in att and att["id"]!="SIZE_GRID_ROW_ID":
@@ -3373,7 +3501,10 @@ class product_product(models.Model):
             updated_attributes.append( { "id": "SELLER_SKU", "value_name": variant.default_code } )
 
         if not barcode_updated and set_barcode and variant.barcode:
-            updated_attributes.append( { "id": "GTIN", "value_name": variant.barcode } )
+            # category-aware: solo agregar GTIN si el barcode es un EAN/GTIN válido
+            _gtin_attr = variant._meli_gtin_attribute(variant.barcode, variant.meli_category)
+            if _gtin_attr:
+                updated_attributes.append(_gtin_attr)
 
         var_attributes_grid = variant._update_row_size_grid_attribute( attributes=attributes, var_info = var_info )
         _logger.info("var_attributes_grid: "+str(var_attributes_grid))
@@ -3651,7 +3782,11 @@ class product_product(models.Model):
             return warningobj.info( title='MELI WARNING', message="La longitud del título ("+str(len(product.meli_title))+") es muy corta o no significativa, escriba un titulo coherente con su marca, modelo, etc...", message_html=product.meli_title )
 
         if ( product.meli_title and len(product.meli_title)>60 ):
-            return warningobj.info( title='MELI WARNING', message="La longitud del título ("+str(len(product.meli_title))+") es superior a 60 caracteres.", message_html=product.meli_title )
+            _msg = ("El título tiene "+str(len(product.meli_title))+" caracteres y MercadoLibre "
+                    "permite un máximo de 60. Acortá el campo 'Nombre del producto en Mercado Libre' "
+                    "(pestaña MercadoLibre del producto). Recordá que el título se puede editar hasta "
+                    "que entre la primera venta.")
+            return warningobj.info( title='MELI WARNING', message=_msg, message_html=product.meli_title )
 
         #_product_post_set_price
         product.set_meli_price(meli=meli,config=config)
@@ -3782,10 +3917,14 @@ class product_product(models.Model):
             product.meli_model = product_tmpl.meli_model
 
         if (product.barcode and not product_tmpl.meli_pub_as_variant and not "GTIN" in attributes_ids):
-            attribute = { "id": "GTIN", "value_name": product.barcode }
-            attributes_ids[attribute["id"]] = attribute["value_name"]
-            attributes.append(attribute)
-            _logger.info("attributes:"+str(attributes))
+            # category-aware: solo mandar GTIN si el barcode es un EAN/GTIN válido
+            # (evita el 400 'Product Identifier [GTIN] invalid format' cuando el
+            #  barcode es en realidad un SKU interno, p.ej. koreautos 'C6536').
+            attribute = product._meli_gtin_attribute(product.barcode, product.meli_category)
+            if attribute:
+                attributes_ids[attribute["id"]] = attribute["value_name"]
+                attributes.append(attribute)
+                _logger.info("attributes:"+str(attributes))
 
         if product.meli_brand and len(product.meli_brand) > 0 and not "BRAND" in attributes_ids:
             attribute = { "id": "BRAND", "value_name": product.meli_brand }

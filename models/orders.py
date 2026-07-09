@@ -4070,6 +4070,15 @@ class mercadolibre_orders(models.Model):
                     'sale_fee': ("sale_fee" in Item and Item["sale_fee"]) or 0.0
                 }
 
+                # CAPTURA depósito ML por ítem (surtido multi-almacén): la orden trae el
+                # nodo logístico de origen en Item['stock'] = {store_id, node_id}. Se persiste
+                # para el ruteo entrante en _meli_get_stock_location_from_mapping (meli_oerp_stock).
+                _item_stock = ("stock" in Item and isinstance(Item.get("stock"), dict) and Item["stock"]) or {}
+                if ("meli_stock_node_id" in order_items_obj._fields):
+                    order_item_fields['meli_stock_node_id'] = _item_stock.get("node_id") or ''
+                if ("meli_stock_store_id" in order_items_obj._fields):
+                    order_item_fields['meli_stock_store_id'] = _item_stock.get("store_id") or ''
+
                 order.fee_amount = order_item_fields["sale_fee"] or 0.0
 
                 if ("full_unit_price" in Item and "full_unit_price" in order_items_obj._fields):
@@ -4852,6 +4861,100 @@ class mercadolibre_orders(models.Model):
                     order.sale_order.meli_status_detail = order.status_detail
                     order.sale_order.confirm_ml(meli=meli,config=config)
 
+    def orders_resync_status( self, meli=None, config=None, account=None ):
+        """#475 - Re-sincroniza el ESTADO de los pedidos MeLi recientes que siguen
+        ABIERTOS en Odoo, para reflejar cancelaciones (y otros cambios de estado)
+        que el cron de importacion (orders_query_iterate, sort=date_desc) no alcanza
+        cuando la orden es mas vieja que la ventana de las ~50 mas nuevas por creacion.
+
+        Barrido ACOTADO (rate-limit safe): solo pedidos con sale.order NO cancelada,
+        creados en los ultimos N dias (mercadolibre_cron_orders_status_days), con tope
+        mercadolibre_cron_orders_status_limit. Por pedido hace UN GET /orders/<id> (ligero)
+        y solo procesa (confirm_ml / meli_cancel_with_detail) cuando el estado CAMBIO.
+
+        #475 multi-cuenta: `account` (mercadolibre.account) es opcional. Cuando el
+        dispatcher de meli_oerp_multiple lo pasa, el barrido se scopea por esa cuenta
+        (connection_account) y toma la compañia del `config` (connection_configuration).
+        Sin `account` el comportamiento es identico al mono-cuenta historico."""
+        company = self.env.user.company_id
+        if not config:
+            config = company
+        # #475 multi-cuenta: si el config trae su propia compania (connection_configuration
+        # en meli_oerp_multiple), usarla para scopear; si es res.company (mono-cuenta) o no
+        # la expone, se cae al company del usuario del cron (retrocompat total).
+        if config is not None and "company_id" in config._fields and config.company_id:
+            company = config.company_id
+        if not meli:
+            meli = self.env['meli.util'].get_new_instance(company)
+        if not meli or meli.needlogin_state:
+            return {}
+
+        days = 7
+        if "mercadolibre_cron_orders_status_days" in config._fields and config.mercadolibre_cron_orders_status_days:
+            days = config.mercadolibre_cron_orders_status_days
+        query_limit = 100
+        if "mercadolibre_cron_orders_status_limit" in config._fields and config.mercadolibre_cron_orders_status_limit:
+            query_limit = config.mercadolibre_cron_orders_status_limit
+
+        cutoff = fields.Datetime.now() - timedelta(days=days)
+        domain = [
+            ("date_created", ">=", cutoff),
+            ("sale_order", "!=", False),
+            ("sale_order.state", "!=", "cancel"),
+            ("status", "not in", ("cancelled", "invalid")),
+        ]
+        if "company_id" in self._fields:
+            domain.append(("company_id", "in", (company.id, False)))
+        # #475 multi-cuenta: scope preciso por cuenta ML cuando el dispatcher lo pasa,
+        # para no re-consultar con el token de una cuenta ordenes de otra.
+        if account is not None and "connection_account" in self._fields:
+            domain.append(("connection_account", "=", account.id))
+        candidates = self.search(domain, order="date_created desc", limit=query_limit)
+
+        Autocommit(self, False)
+        checked = changed = cancelled = 0
+        for order in candidates:
+            try:
+                response = meli.get("/orders/"+str(order.order_id), {'access_token': meli.access_token})
+                order_json = response.json()
+                checked += 1
+                if "id" not in order_json:
+                    continue
+                new_status = order_json.get("status") or ''
+                if str(order.status) == str(new_status):
+                    # sin cambios -> sin side effects (idempotente, barato: 1 GET)
+                    continue
+                changed += 1
+                cancel_detail = order_json.get("cancel_detail") or {}
+                cancel_detail_text = ""
+                if cancel_detail:
+                    cancel_detail_text = " | %s: %s (solicitado por: %s, fecha: %s)" % (
+                        cancel_detail.get("code", ""),
+                        cancel_detail.get("description", ""),
+                        cancel_detail.get("requested_by", ""),
+                        cancel_detail.get("date", ""),
+                    )
+                order.status = new_status
+                order.status_detail = (order_json.get("status_detail") or '') + cancel_detail_text
+                sorder = order.sale_order
+                if sorder:
+                    sorder.meli_status_detail = order.status_detail
+                    if new_status == "cancelled" and sorder.state in ("draft", "sent", "sale", "done"):
+                        cancel_msg = "Orden cancelada por MercadoLibre."
+                        if sorder.meli_status_detail:
+                            cancel_msg += " Motivo: %s" % sorder.meli_status_detail
+                        sorder.meli_cancel_with_detail(cancel_msg)
+                        cancelled += 1
+                    else:
+                        # otro cambio de estado -> resync completo por ID
+                        order.orders_update_order(meli=meli, config=config)
+                MeliCommit(self)
+            except Exception as e:
+                _logger.error("orders_resync_status > error en orden %s: %s", order.order_id, e, exc_info=True)
+                MeliRollback(self)
+        _logger.info("orders_resync_status: cuenta=%s checked=%s changed=%s cancelled=%s (days=%s limit=%s)", (account and account.name) or "-", checked, changed, cancelled, days, query_limit)
+        return {"checked": checked, "changed": changed, "cancelled": cancelled}
+
     def _get_config( self, config=None ):
         
         _logger.info("_get_config from meli_oerp")
@@ -5096,6 +5199,15 @@ class mercadolibre_order_items(models.Model):
     seller_sku = fields.Char(string='SKU',index=True)
     seller_custom_field = fields.Char(string='seller_custom_field',index=True)
     sale_fee = fields.Float(string="Sale Fee",index=True)
+
+    # Surtido multi-almacén: la orden ML trae el depósito logístico de origen a
+    # nivel ítem en Item['stock'] = {store_id, node_id}. Se persiste por línea para
+    # rutear la entrega al warehouse/ubicación Odoo mapeado en
+    # mercadolibre.account.stock_location (network_node_id <- node_id ; meli_store_id <- store_id).
+    meli_stock_node_id = fields.Char(string='ML Stock Node ID', index=True,
+        help='Network node del depósito ML de origen de esta línea (Item.stock.node_id, ej: MXP4397768091).')
+    meli_stock_store_id = fields.Char(string='ML Stock Store ID', index=True,
+        help='Store id del depósito ML de origen de esta línea (Item.stock.store_id).')
 
 
 class mercadolibre_payments(models.Model):

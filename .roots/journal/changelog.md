@@ -4,6 +4,52 @@
 
 ---
 
+## Versión 19.0.26.66 — Surtido multi-almacén: se captura el depósito de origen de MercadoLibre
+8 jul 2026
+
+**Cambios:**
+
+1. Cada línea de la orden de MercadoLibre ahora guarda el **depósito logístico de origen** que ML
+   asigna al surtir (el nodo de red y la tienda que ML manda en `Item.stock` de la orden), en dos
+   campos nuevos de la línea de orden: **"ML Stock Node ID"** y **"ML Stock Store ID"**. Es la base
+   del **surtido multi-almacén**: permite rutear la venta al almacén/ubicación de Odoo que
+   corresponde al depósito desde el que ML surte esa línea (la resolución vive en el módulo Stock,
+   ver meli_oerp_stock). Sin mapeo cargado el comportamiento es idéntico al anterior (inerte).
+
+## Versión 19.0.26.65 — Re-sync de cancelaciones ahora soporta multi-cuenta [#475]
+8 jul 2026
+
+**Cambios:**
+
+1. El barrido que re-consulta a MercadoLibre el estado de los pedidos abiertos de días
+   anteriores (para cancelarlos solos sin abrirlos uno por uno — ver 26.62) ahora puede
+   trabajar **por cuenta de MercadoLibre**. El método `orders_resync_status` acepta un
+   parámetro opcional de cuenta: cuando se le indica, limita el barrido a los pedidos de
+   esa cuenta y usa la compañía de su configuración. Sin ese parámetro, el comportamiento
+   es idéntico al anterior (mono-cuenta). Esto habilita que en instalaciones con varias
+   cuentas/tiendas de MercadoLibre en un mismo Odoo, TODAS las cuentas queden cubiertas
+   (el dispatcher vive en el módulo Multi-cuenta).
+
+
+## Versión 19.0.26.63 — Medidas del paquete: se corrigen valores viejos equivocados al traer de MercadoLibre [#424]
+8 jul 2026
+
+**Cambios:**
+
+1. Al importar/actualizar un producto desde MercadoLibre (y con la acción **"Traer medidas"**), las **dimensiones del paquete del vendedor** (Alto/Ancho/Largo/Peso del paquete — Mercado Envíos) ahora se **corrigen con el valor de MercadoLibre**, que es la fuente autoritativa del paquete. Antes, si un proceso viejo había dejado en esos campos la medida del *producto* en lugar de la del *paquete* (por ejemplo "100 cm", el ancho del producto, en vez de "10 cm", el del paquete), ese valor viejo equivocado se conservaba. Ahora MercadoLibre lo pisa.
+2. Si MercadoLibre no informa la medida del paquete, no se borra lo cargado (no se pisa con vacío). Marca/Modelo/Género siguen respetando la carga manual (sólo se completan si están vacíos).
+
+
+## Versión 19.0.26.62 — Cancelaciones de MercadoLibre que no se reflejaban solas en Odoo [#475]
+8 jul 2026
+
+**Cambios:**
+
+1. **Las cancelaciones (y cambios de estado) de pedidos hechas en MercadoLibre ahora se reflejan solas en Odoo, aunque el pedido sea más viejo que las últimas ~50 órdenes.** Antes, el cron horario de importación sólo repasaba las órdenes más nuevas por fecha de creación; si un pedido de días atrás se cancelaba en ML, la cancelación no bajaba a Odoo hasta abrir la orden a mano. Ahora un cron dedicado ("Cron Meli Orders Status Resync", cada 30 min) re-consulta los pedidos abiertos recientes y refleja la cancelación automáticamente (con su devolución/NC según la política contable ya configurada).
+
+2. Nuevos parámetros por compañía (Configuración ML → Automatización ML a Odoo): activar/desactivar el re-sync de estado, ventana en días hacia atrás (default 7) y tope de pedidos por ciclo (default 100) para acotar el uso de la API.
+
+
 ## Versión 19.0.26.61 — Stock multiwarehouse: se corrige un caso que impedía publicar stock [#425]
 5 jul 2026
 

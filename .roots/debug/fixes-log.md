@@ -4,6 +4,99 @@
 
 ---
 
+### 8 jul 2026 — fix(carga v18/v19): `ir.ui.view type='tree'` → `list` en `claims_view.xml` (v19.0.26.66)
+
+**Archivos:** `views/claims_view.xml` (vista `view_meli_claims_tree`).
+
+**Problema:** Odoo 18 removió `tree` del selection de `ir.ui.view.type`; al cargar el módulo
+fallaba con `ValueError: Wrong value for ir.ui.view.type: 'tree'` (el `arch` ya era `<list>`).
+Bloqueaba el `-u`/instalación de meli_oerp en TODO cliente 18.0/19.0. Detectado en el build de
+Tus Refacciones MX (431, 26.67, build Odoo.sh 34644423).
+
+**Fix:** `<field name="type">tree</field>` → `list`. Sólo v18/v19 (en ≤17 `tree` sigue siendo
+válido → no se toca, migración ≠ refactor).
+
+### 8 jul 2026 — fix(carga v17+): quitar `ir.cron` `numbercall` de `claims_cron.xml` (v19.0.26.66)
+
+**Archivos:** `data/claims_cron.xml` (cron `cron_sync_claims`, Fase 1, `active=False`).
+
+**Problema:** Odoo 17 removió los campos `numbercall`/`doall` de `ir.cron`; al cargar el data XML
+fallaba con `Invalid field 'numbercall' on model 'ir.cron'`. Bug latente en el source para todo
+cliente 17/18/19 (el cron es nuevo, Fase 1). Detectado en Tus Refacciones MX (431, build 34645734).
+
+**Fix:** se elimina el `<field name="numbercall">-1</field>` (el cron corre indefinido por
+defecto). Sólo v17/v18/v19 (en ≤16 `numbercall` sigue siendo válido → no se toca).
+
+### 8 jul 2026 — perf(backfill): resolucion de cuenta por FETCH DIRECTO por item — funciona en cuentas GRANDES (v19.0.26.64) [#424 Deco/KPI 526]
+
+**Archivos/funciones:** `models/product.py`
+- `product.template._meli_backfill_fetch_item(meli, meli_id)` (NUEVO helper, proxy-safe)
+- `product.template.action_meli_backfill_template_fields` (reescrito: pre-scan → fetch directo)
+- `product.template._meli_backfill_list_ids` (docstring: ahora fallback opcional, ya no lo usa el backfill)
+
+**Problema (verificado prod Deco 526):** el backfill resolvía la cuenta ML dueña de cada ítem
+**pre-escaneando la lista completa de ítems de cada cuenta** (`_meli_backfill_list_ids` →
+`fetch_list_meli_ids` → `/users/<seller>/items/search` paginado) para armar el mapa
+`meli_id→cuenta`. En cuentas GRANDES (DECO tiene **20.834 ítems**) ese pre-scan NO cubre todos los
+ítems → muchos productos quedaban SIN resolver dueño → el botón "Traer medidas" no los corregía.
+Confirmado: `MLA1685903163` no lo tocaba el backfill, pero un fetch DIRECTO del ítem sí lo corrige.
+
+**Fix:** se eliminó el pre-scan. Ahora, por cada `product.template` a backfillear, se obtiene su
+`meli_id` (de la variante vía `_meli_template_variant`) y se hace **fetch directo**
+`GET /items/<meli_id>?include_attributes=all` **probando el token de cada cuenta ML logueada**
+(las cuentas siguen viniendo del hook `_meli_backfill_get_accounts` — base=res.company,
+meli_oerp_multiple=mercadolibre.account) hasta que una devuelve **HTTP 200** = la cuenta dueña (con
+token ajeno da 403 access_denied y se prueba la siguiente). Es exactamente la corrección masiva que
+se corrió a mano y funcionó. La cuenta que respondió OK se recuerda y se prueba primero (los ítems
+de un mismo seller vienen en rachas); luego la compañía del propio producto. El fetch usa
+`meli.get()` de la instancia `meli.util` del hook → **proxy-safe** (en clientes con el rescate proxy
+rutea por su http_proxy; NO urllib crudo). `_meli_backfill_fetch_item` detecta éxito por
+`status_code==200` + rjson dict con `id` y sin `error`.
+
+**Se mantiene:** savepoint por producto (un ítem que falla no corta el lote), log de progreso cada 50,
+y la semántica de overwrite del 26.63 (`_meli_import_template_attributes`: SELLER_PACKAGE_* pisa,
+brand/model/gender fill-empty) INTACTA — se construye encima. Sin cambio de schema (sin migración).
+
+**Alcance:** solo el backfill (helper nuevo + método). `meli_oerp_multiple` NO cambia: su override de
+`_meli_backfill_get_accounts` sólo aporta la lista de cuentas, que el fetch directo consume igual.
+`py_compile` OK + bloque byte-idéntico en 16/17/18/19.
+
+---
+
+### 8 jul 2026 — fix(backfill/import): dims del paquete pisan con ML SELLER_PACKAGE_* (v19.0.26.63) [#424 Deco/KPI 526, verificado prod Deco]
+
+**Archivos/funciones:** `models/product.py::product.product._meli_import_template_attributes`
+
+**BUG D (KPI vía WhatsApp, ej. `MLA1685903163` "Cortina 100x200"):** ML trae
+`SELLER_PACKAGE_WIDTH='10 cm'` (paquete) y `WIDTH='1 m'` (producto), pero Odoo mostraba
+`meli_seller_package_width='100 cm'` = el WIDTH del producto (1 m→100 cm), un valor **legacy** que un
+proceso viejo metió en el campo del paquete. El import idempotente lo **preservaba** en vez de
+corregirlo.
+
+**Fix:** se dividió la semántica de escritura con `_MELI_IMPORT_OVERWRITE_FIELDS` (= las 4 dims del
+paquete): dims del paquete → **OVERWRITE** con `SELLER_PACKAGE_*` siempre que ML traiga valor no-vacío
+(ML es autoritativo del paquete); `PACKAGE_*` catalog sigue como fallback SOLO si no hay
+`SELLER_PACKAGE_*`; ML vacío NUNCA borra; brand/model/gender siguen **fill-empty**. El backfill usa el
+mismo helper → al re-correrlo corrige los ya importados. Sin cambio de schema.
+
+**Commits:** 16 `f8b74fe2` · 17 `fe9ed470` · 18 `0347cf7e` · 19 `a56142de`. Deployado a Deco (patch
+quirúrgico, prod `9340ed9`).
+
+---
+
+### 8 jul 2026 — feat(orders): cron dedicado de re-sync de estado para cancelaciones fuera de ventana (v19.0.26.62) [#475 ScoreMX]
+
+**Archivos/funciones:**
+- `models/orders.py::mercadolibre_orders.orders_resync_status` (NUEVO)
+- `models/company.py::res_company.cron_meli_orders_status` (NUEVO) + campos `mercadolibre_cron_get_orders_status` (bool, default True), `mercadolibre_cron_orders_status_days` (int, default 7), `mercadolibre_cron_orders_status_limit` (int, default 100)
+- `data/cron_jobs.xml`: `ir_cron_module_cron_meli_orders_status` (cada 30 min, activo)
+- `views/company_view.xml`: los 3 campos en el grupo "Automatización ML a Odoo"
+
+**Problema (#475, suite-wide 16/17/18/19):** el cron horario `cron_meli_orders → meli_query_orders → orders_query_recent → orders_query_iterate` consulta `/orders/search?seller=…&sort=date_desc` (orden por fecha de CREACIÓN). Sin `mercadolibre_filter_order_datetime` la paginación se desactiva (`orders_query_iterate`: `if orders_limit or not order_date_filter: offset_next = 0`) → sólo re-procesa las ~50 órdenes más nuevas por creación. Una orden vieja cancelada días después queda fuera de esa ventana → nunca se re-consulta → la cancelación no baja a Odoo hasta abrir la orden a mano (refresh puntual por ID). El banner `_compute_meli_cancel_pending_banner` ya detectaba el gap pero ningún cron lo resolvía.
+
+**Fix:** cron dedicado que barre `mercadolibre.orders` con `sale_order` NO cancelada, `date_created` en los últimos N días y `status not in (cancelled, invalid)`, ordenado por fecha desc y **acotado por `limit`**. Por pedido hace **UN** `GET /orders/<id>`; si el estado NO cambió, no toca nada (idempotente, barato). Si cambió a `cancelled`, reusa `sale.order.meli_cancel_with_detail` (misma lógica del banner: devolución de albaranes, política de facturas, cancelación de la SO); otros cambios delegan a `orders_update_order` (resync por ID). **Rate-limit:** sólo candidatos recientes+abiertos, tope configurable (default 100), 1 GET por pedido salvo cambio real; respeta el retry/backoff de `meli.get`. Alineado 16≡17≡18≡19 (único delta entre versiones = estilo de `data/cron_jobs.xml` y line-endings preexistentes). Sin push.
+
+
 ### 5 jul 2026 — fix(stock): _fetch_meli_user_product_id devolvía la lista-string str(upids) (v19.0.26.61) [#425 Elvimarta/158] (A2)
 
 **Archivos/funciones:** `models/product.py::product.product._fetch_meli_user_product_id`

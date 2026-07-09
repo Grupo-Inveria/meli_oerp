@@ -6,6 +6,21 @@
 
 ## 2026
 
+**2026-07-08** `[19.0.26.65]` — `orders_resync_status` acepta `account=None` (multi-cuenta) [#475]
+
+El re-sync de estado de #475 (26.62) era mono-cuenta: `orders_resync_status` derivaba `company` de `self.env.user.company_id` y consultaba con un único token. Se agregó param opcional `account` (mercadolibre.account): cuando viene (lo pasa el dispatcher de meli_oerp_multiple) el dominio suma `("connection_account","=",account.id)` y `company` se deriva de `config.company_id` (connection_configuration) en vez del user del cron. Retrocompat total: sin `account`, idéntico al histórico (config=res.company sin `company_id` → cae a env.user.company_id). Log final ahora incluye `cuenta=`. Bump 26.64→26.65, 4 versiones. El dispatcher vive en meli_oerp_multiple (no requiere ir.cron nuevo: reutiliza `ir_cron_module_cron_meli_orders_status`). Caso Score/WODPRO (co1 361 + co3 499 mismo Odoo).
+
+---
+
+**2026-07-08** `[19.0.26.63]` — Import de medidas del paquete: fill-empty → OVERWRITE (ML autoritativo) [#424 Deco/KPI]
+
+`_meli_import_template_attributes` (models/product.py) escribía cada campo mapeado cuando ML traía valor, pero para las dimensiones del paquete no alcanzaba: filas legacy tenían el WIDTH/HEIGHT del *producto* (ej. '100 cm' = 1 m convertido) en `meli_seller_package_*`, y el import/backfill las conservaba porque el mapeo NO toca el atributo bare WIDTH/HEIGHT/LENGTH (sólo `SELLER_PACKAGE_*` + fallback catalog `PACKAGE_*`). Se dividió la semántica de escritura:
+- `_MELI_IMPORT_OVERWRITE_FIELDS` (las 4 dims del paquete) → **OVERWRITE** con `SELLER_PACKAGE_*` (ML es fuente autoritativa del paquete). `PACKAGE_*` sólo como fallback si no hay `SELLER_PACKAGE_*`; nunca pisa con vacío (`if not val: continue`).
+- brand/model/gender → **fill-empty** (no pisar carga manual).
+El backfill "Traer medidas" usa el mismo helper → corrige los ya importados. Sin cambio de schema (sin migración). Bumps 26.62→26.63, 4 versiones.
+
+---
+
 **2026-05-02** `[16.0.shoppy]` — Sesión intensiva de features, fixes y estabilización.
 
 Sesión larga cubriendo múltiples áreas del módulo:
