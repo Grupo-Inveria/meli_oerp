@@ -743,14 +743,31 @@ class sale_order(models.Model):
                 continue
             try:
                 wiz = ReturnWiz.with_context(active_id=picking.id, active_ids=[picking.id], active_model="stock.picking").create({})
-                # Guard cantidad-cero: si el wizard no calculó nada a devolver, no intentar
-                # (action_create_returns tiraría 'Especifique al menos una cantidad diferente a
-                # cero' y el cron lo reintentaría en bucle). Típico de pickings FULL cuyo stock
-                # vive en el fulfillment de ML.
-                if "product_return_moves" in wiz._fields and not sum(wiz.product_return_moves.mapped("quantity")):
-                    _logger.info("Return omitida para %s: sin cantidades a devolver (FULL).", picking.name)
-                    continue
-                if hasattr(wiz, "action_create_returns"):
+                if hasattr(wiz, "action_create_returns_all"):
+                    # Odoo 18+: el core ya NO precalcula product_return_moves.quantity
+                    # (siempre nace en 0 — ver stock/wizard/stock_picking_return.py
+                    # _prepare_stock_return_picking_line_vals_from_move). Ese cálculo
+                    # ("entregado - ya devuelto") se movió a action_create_returns_all(),
+                    # que hay que llamar en vez de action_create_returns() directo o
+                    # SIEMPRE da "Especifique al menos una cantidad diferente a cero"
+                    # (visto en prod: picking done con qty entregada > 0, no un caso FULL
+                    # sin stock real). El guard de cantidad-cero pasa a mirar la cantidad
+                    # ENTREGADA en los moves originales (no product_return_moves, que acá
+                    # siempre es 0) para seguir saltando limpio los casos sin nada real
+                    # que devolver.
+                    if not sum(picking.move_ids.filtered(lambda m: m.state != "cancel" and not m.scrapped).mapped("quantity")):
+                        _logger.info("Return omitida para %s: sin cantidades entregadas a devolver.", picking.name)
+                        continue
+                    wiz.action_create_returns_all()
+                elif hasattr(wiz, "action_create_returns"):
+                    # Odoo <=17: product_return_moves.quantity ya viene precalculado
+                    # por el propio wizard (entregado - ya devuelto). Guard cantidad-cero:
+                    # si dio 0, no intentar (action_create_returns tiraría 'Especifique al
+                    # menos una cantidad diferente a cero' y el cron reintentaría en bucle).
+                    # Típico de pickings FULL cuyo stock vive en el fulfillment de ML.
+                    if "product_return_moves" in wiz._fields and not sum(wiz.product_return_moves.mapped("quantity")):
+                        _logger.info("Return omitida para %s: sin cantidades a devolver (FULL).", picking.name)
+                        continue
                     wiz.action_create_returns()
                 elif hasattr(wiz, "create_returns"):
                     wiz.create_returns()
@@ -2018,6 +2035,7 @@ class mercadolibre_orders(models.Model):
             'meli_currency_id': ("currency_id" in order_json and order_json["currency_id"]),
             'meli_date_created': ml_datetime(order_json["date_created"]),
             'meli_date_closed': ml_datetime(order_json["date_closed"]),
+            'date_order': ml_datetime(order_json["date_closed"]) or ml_datetime(order_json["date_created"]),
         }
         return meli_order_fields
 
@@ -4859,7 +4877,17 @@ class mercadolibre_orders(models.Model):
                 order.status_detail = (order_json.get("status_detail") or '') + cancel_detail_text
                 if order.sale_order:
                     order.sale_order.meli_status_detail = order.status_detail
-                    order.sale_order.confirm_ml(meli=meli,config=config)
+                    if order_json["status"] in ("cancelled",):
+                        sorder = order.sale_order
+                        if sorder.meli_status != "cancelled":
+                            sorder.meli_status = "cancelled"
+                        if sorder.state in ["draft", "sale", "sent", "done"]:
+                            cancel_msg = "Orden cancelada por MercadoLibre."
+                            if order.status_detail:
+                                cancel_msg += " Motivo: %s" % order.status_detail
+                            sorder.meli_cancel_with_detail(cancel_msg)
+                    else:
+                        order.sale_order.confirm_ml(meli=meli,config=config)
 
     def orders_resync_status( self, meli=None, config=None, account=None ):
         """#475 - Re-sincroniza el ESTADO de los pedidos MeLi recientes que siguen
