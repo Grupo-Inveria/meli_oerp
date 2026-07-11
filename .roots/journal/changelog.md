@@ -4,6 +4,77 @@
 
 ---
 
+## Versión 19.0.26.72 — "Sugerir Categoría" mucho más rápido [#532]
+10 jul 2026
+
+**Cambios:**
+
+1. El botón **"Sugerir Categoría"** (pestaña MercadoLibre del producto) ahora responde en 1-2s
+   en vez de ~10s. Antes, al sugerir, se importaba cada categoría candidata con TODOS sus
+   atributos y su árbol completo (decenas de llamadas a la API de MercadoLibre). Ahora la
+   sugerencia trae sólo lo necesario para elegir (identificador + nombre) de las 3 primeras
+   opciones; si la categoría ya existe en el sistema, no vuelve a consultar a ML.
+2. Los **atributos completos** de la categoría se cargan al **SELECCIONARLA** (no al sugerir),
+   por lo que la publicación sigue validando y enviando todo igual que antes (el pre-flight de
+   atributos obligatorios no cambia).
+
+
+## Versión 19.0.26.71 — Errores al publicar: ahora legibles, en español y accionables [#532]
+10 jul 2026
+
+**Cambios:**
+
+1. Cuando MercadoLibre rechaza una publicación, el aviso que ve el usuario ahora traduce a
+   **español claro y accionable** varios errores que antes salían crudos en inglés:
+   - "attributes are required" / build-title → *"Faltan atributos obligatorios de la categoría.
+     Completá la ficha técnica del producto (marca, modelo, código universal, etc.)…"*.
+   - `[family_name]` faltante → *"Falta el Nombre de la familia (Family Name)…"*.
+   - GTIN/EAN requerido o faltante → *"Debe definir el código de barras (GTIN/EAN)…"*.
+   - SKU del vendedor, categoría inválida/requerida, y otras propiedades del catálogo.
+2. Se mejoró la **presentación**: cuando el error llega como un único mensaje (no como lista de
+   causas) —el caso típico de build-title— ahora se muestra con el mismo recuadro estilado
+   (rojo si bloquea la publicación, amarillo si es advertencia), con ícono y un título claro,
+   igual que la lista de causas. Antes ese caso se veía pobre y en amarillo fijo.
+3. Comportamiento **defensivo**: si un mensaje no coincide con ningún patrón conocido, se
+   conserva el texto original de MercadoLibre (nunca se pierde información).
+
+
+## Versión 19.0.26.70 — Cancelaciones de días anteriores: el barrido ahora cubre TODA la ventana [#475]
+10 jul 2026
+
+**Cambios:**
+
+1. El barrido que detecta y cancela solas las ventas que MercadoLibre canceló días atrás
+   (sin abrir el pedido) ahora se concentra en las órdenes **en tránsito / no entregadas**,
+   que son las únicas que un comprador puede cancelar. Las ya **entregadas** se excluyen
+   (no son cancelables por esa vía), lo que reduce muchísimo el volumen a revisar y permite
+   que el barrido cubra **toda la ventana de días** configurada, en lugar de solo un puñado
+   de las más recientes (que el proceso normal ya cubría).
+2. El barrido ahora recorre primero las órdenes **más viejas** de la ventana — que son
+   justamente las de mayor riesgo de haber sido canceladas sin que Odoo se enterara — y deja
+   para el final las más nuevas (ya cubiertas por el proceso normal).
+3. Se ampliaron los valores por defecto de la ventana (15 días) y del tope por ciclo (500);
+   en la práctica se ajustan por configuración según el volumen de cada cuenta.
+
+
+## Versión 19.0.26.69 — "Actualizar Título": empujar solo el título de la publicación a Mercado Libre
+10 jul 2026
+
+**Cambios:**
+
+1. **Nueva opción "Actualizar Título" en el wizard de Publicar.** Al publicar/actualizar productos en
+   Mercado Libre ahora hay una casilla **Actualizar Título** (junto a Actualizar Stock / Actualizar
+   Precio). Marcada, empuja **solo el título** de la/s publicación/es (`PUT /items/{id}` con
+   `{ "title": ... }`), sin re-publicar el producto completo. Disponible en el wizard de producto y
+   en el de plantilla. El título enviado sale del campo **ML Title** (`meli_title`) del producto; si
+   está vacío se usa el nombre del producto.
+2. **Reporte de error en pantalla.** Si Mercado Libre rechaza el cambio de título (p. ej. título
+   > 60 caracteres, publicación con catálogo/moderación o no modificable), el wizard muestra el
+   detalle del error devuelto por ML en un aviso, en lugar de fallar en silencio.
+
+> Motivado por el cliente RPM Motos (#532), que necesitaba actualizar títulos de publicaciones desde
+> Odoo. El título es un dato a nivel item (no por variación): el PUT se hace siempre contra el item padre.
+
 ## Versión 19.0.26.68 — La fecha de la orden refleja la fecha real de MercadoLibre + cancelación explícita al re-chequear estado
 9 jul 2026
 
