@@ -4,6 +4,21 @@
 
 ---
 
+**2026-07-16** `[19.0.26.79]` — publish: envia WIDTH/HEIGHT/LENGTH + VALUE_ADDED_TAX/IMPORT_DUTY a ML [#424/#474 Deco/KPI]
+
+Cara de publicacion (bidireccional con el import de 26.78). En el builder de atributos del body (junto al bloque SELLER_PACKAGE_*): dimensiones del producto -> WIDTH/HEIGHT/LENGTH reconstruidas como "<%g> <unit>" desde meli_product_{width,height,length} + *_unit; e IVA/impuesto interno -> VALUE_ADDED_TAX/IMPORT_DUTY desde meli_vat/meli_import_duty. Solo agrega el atributo si no venia ya en attributes_ids (no pisa lo explicito). Enviar VALUE_ADDED_TAX/IMPORT_DUTY (obligatorios) cierra el error de publicacion de #474. Bump 26.78->26.79.
+
+---
+
+**2026-07-16** `[19.0.26.78]` — dimensiones del producto (float+unidad) + IVA/impuesto interno desde ML [#424/#474 Deco/KPI]
+
+Pedido en call con Deco/KPI. Campos nuevos en product.template y product.product (pestaña MELI Plantilla):
+- `meli_product_{width,height,length}` (Float) + `*_unit` (Char) ← atributos WIDTH/HEIGHT/LENGTH. Parser `_meli_parse_dimension` (value_struct {number,unit} o value_name "1.2 m"/"70 cm"/coma decimal → (float, unidad)). NO se normaliza: se guarda el número y la unidad tal cual (por eso el campo de unidad).
+- `meli_vat` / `meli_import_duty` (Char) ← VALUE_ADDED_TAX / IMPORT_DUTY (los DOS atributos que hacían fallar la publicación en #474). Van al `_MELI_IMPORT_ATTR_MAP` + overwrite (ML autoritativo).
+Poblado en `_meli_import_template_attributes` (nuevo pase de dims tras el loop de Char, escribe template+variante). Como `meli_oerp_multiple.product_meli_get_product` NO encadena a la base, se agregó ahí la llamada a `_meli_import_template_attributes` (antes solo "Traer medidas" llenaba estos campos en multi-cuenta). Verificado el parser con los valores reales de Deco. Bump 26.77→26.78. Backport 16/17/18 pendiente en la misma tanda.
+
+---
+
 **2026-07-15** `[19.0.26.77]` — "Traer medidas": la acción de lista tragaba el resultado + backfill mudo [#485 Deco/KPI]
 
 El cliente reportó "aparece la opción pero no hace nada" al usar la acción masiva desde la vista Lista. **Corría bien**: el log de prod (Deco, 13/7 12:43) muestra `MELI backfill plantilla: finished 2342/2342 (ok=2342, errors=2)` — escribió el reclamo a las 12:43:21, mientras el proceso todavía corría (terminó 12:43:51). Dos causas independientes, ambas de feedback:

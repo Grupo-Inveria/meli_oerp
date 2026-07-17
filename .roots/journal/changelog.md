@@ -4,6 +4,28 @@
 
 ---
 
+## Versión 19.0.26.79 — Al publicar, se envían a MercadoLibre las dimensiones y los impuestos del producto [#424/#474 Deco/KPI]
+16 jul 2026
+
+**Cambios:**
+
+1. Al **publicar o actualizar** una publicación en MercadoLibre, ahora se envían automáticamente, como atributos de la publicación, el **Ancho / Alto / Largo del producto** (WIDTH/HEIGHT/LENGTH, reconstruidos como "1.2 m" desde el número + unidad) y el **IVA** e **Impuesto interno** (VALUE_ADDED_TAX / IMPORT_DUTY).
+2. Como IVA e Impuesto interno suelen ser **obligatorios** para publicar, enviarlos automáticamente **evita el error de publicación** por atributo faltante (el que se veía en el ticket #474).
+
+Con la importación (26.78) y la publicación (26.79), estos campos viajan en los dos sentidos: MercadoLibre → Odoo al importar, y Odoo → MercadoLibre al publicar.
+
+## Versión 19.0.26.78 — Dimensiones del producto + IVA/Impuesto interno se traen de la ficha técnica de ML [#424/#474 Deco/KPI]
+16 jul 2026
+
+**Cambios:**
+
+1. Nuevos campos en el producto (plantilla y variante), en la pestaña MercadoLibre Plantilla, que se completan solos al importar desde la **ficha técnica** de la publicación:
+   - **Ancho / Alto / Largo del producto** (valor numérico + su unidad, tal como los publica MercadoLibre). Son las medidas **del producto** (por ejemplo la cortina), distintas de las dimensiones del **paquete** de envío que ya existían.
+   - **IVA** y **Impuesto interno** (ej. "21 %", "0 %"). Suelen ser **obligatorios** para publicar; al traerlos automáticamente ya no hace falta cargarlos a mano.
+2. Estos campos se completan tanto al **Importar** productos como con el botón **"Traer medidas"**, y MercadoLibre es la fuente autoritativa (si la publicación trae el dato, se actualiza; si no lo trae, no se borra lo que haya).
+
+**Nota:** las medidas del producto salen de los atributos de la publicación (Ancho/Alto/Largo). Si la variación de MercadoLibre trae su propia medida se usa esa; si no, se usa la de la publicación.
+
 ## Versión 19.0.26.77 — "Traer medidas" ahora avisa qué hizo (antes parecía no hacer nada) [#485 Deco/KPI]
 15 jul 2026
 
