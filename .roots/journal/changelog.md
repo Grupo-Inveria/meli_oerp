@@ -4,6 +4,15 @@
 
 ---
 
+## Versión 19.0.26.85 — Aviso de mensajes del comprador sin leer en las órdenes de ML [#499 Deco/KPI]
+22 jul 2026
+
+**Cambios:**
+
+1. Las órdenes de MercadoLibre ahora muestran un contador de **mensajes del comprador sin responder** (post-venta), para saber de un vistazo qué ventas tienen un mensaje pendiente sin tener que revisar publicación por publicación en MercadoLibre.
+2. Nuevo filtro **"Con mensajes del comprador sin leer"** en la lista de órdenes, y un enlace directo a la conversación en MercadoLibre.
+3. Se actualiza solo cada 10 minutos (proceso automático) y también hay un botón **"Refrescar mensajes"** en la cuenta para actualizarlo al instante.
+
 ## Versión 19.0.26.84 — "Traer medidas" ahora completa TODAS las variantes, no solo la primera [#424 Deco/KPI]
 21 jul 2026
 
@@ -11,7 +20,7 @@
 
 1. Al traer las medidas e impuestos de una publicación (con "Traer medidas" o al importar), los datos ahora se escriben en **todas las variantes** de esa publicación, no solo en la primera. Antes, en publicaciones con varias variantes (por ejemplo distintos colores), solo la primera quedaba con las medidas cargadas y el resto quedaba vacío.
 
-## Versión 19.0.26.83 — Comprador (nickname/ID) y zona del receiver buscables en el pedido de venta [#404 Deco/KPI]
+## Versión 19.0.26.82 — Comprador (nickname/ID) y zona del receiver buscables en el pedido de venta [#404 Deco/KPI]
 19 jul 2026
 
 **Cambios:**
