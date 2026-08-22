@@ -4,6 +4,54 @@
 
 ---
 
+### 21 ago 2026 — port a 19.0 del guard de venta facturada [#493 Shoppy] — reemplaza el guard ad-hoc de 19.0.26.93 (v19.0.26.94)
+
+**Por qué:** el fix de 19.0.26.93 (Elvimarta #508) resolvía el caso con un chequeo propio de `qty_invoiced`
+en `shipment.py`. Al portarlo a 16.0 apareció que **esa versión ya tenía resuelto el mecanismo entero**
+desde el #493 (Shoppy, jul-2026) — y que **nunca se forward-porteó a 17/18/19**. El guard del #493 es
+estrictamente mejor: cubre **los tres caminos** que escriben la línea de envío (`set_delivery_line`, el
+`price_unit = 0` directo y `_remove_delivery_line()`), es **configurable** por compañía/configuración
+(`mercadolibre_protect_invoiced_orders`, default **activado**) y **avisa en el chatter de la venta, una
+sola vez**, que MercadoLibre quiso modificar un pedido ya facturado y no se aplicó.
+
+**Qué entra:** `res.company.mercadolibre_protect_invoiced_orders`; en `sale.order`
+`_meli_posted_invoices()`, `_meli_protect_invoiced_enabled()`, `_meli_guard_invoiced()` y el flag
+`meli_invoiced_guard_notified`; en `versions.py` el helper `_meli_guard_delivery_write()` y su uso en
+`set_delivery_line`; en `shipment.py` los dos call sites restantes.
+**El código del guard queda byte a byte igual al de 16.0.**
+
+**Qué sale:** el chequeo ad-hoc de `qty_invoiced` que había agregado 19.0.26.93, ya redundante.
+
+**Requiere `-u meli_oerp`** (campos nuevos).
+
+---
+
+### 21 ago 2026 — fix(shipment): el conector ponía en CERO la línea de envío de órdenes YA FACTURADAS (v19.0.26.93) [Elvimarta 158, ticket #508]
+
+**Reportado por:** Facundo Ambroa (InternationalHome / Elvimarta, cuenta 158, AR, Odoo 17.0), por
+WhatsApp el 19-ago 16:39 CEST: *"La orden entra con el envío correcto, la facturamos, y luego se sigue
+actualizando desde ML, y en algunos casos le saca el monto del envío y lo deja en 0, esto genera que
+haya diferencia entre la orden y la factura anteriormente creada."*
+
+**Causa raíz:** `models/shipment.py`, bloque `if 1==1 and delivery_price<=0.0:` — escribía
+`delivery_line.price_unit = 0.0` / `qty_to_invoice = 0` **directo sobre la línea**, sin mirar si ya
+estaba facturada. `delivery_price` llega en 0 desde `shipment_amount_cond_fix`
+(`amount_total - received_amount > 1`). Ese write **no pasa por `set_delivery_line`**, así que no tenía
+ni la guarda del core (`_remove_delivery_line()` levanta `UserError` si `qty_invoiced != 0`) ni el
+savepoint del fix de #508 (26.48, 28-jul) — que **sí funciona**: en producción se lo ve disparando cada
+20 min. Este es un camino distinto: no borra la línea, la deja en cero.
+
+**Medición (Elvimarta, facturas ML `posted` desde el 1-jul):** 61 de 347 descuadradas,
+**$1.673.959,97**, 48 de órdenes creadas **después** del fix de #508. Caso vivo:
+`ML 2000018025413294`, línea `ME1 - zip`, `is_delivery=t`, `qty_invoiced=2`, `price_unit=0,00`.
+
+**Fix:** si la línea de envío tiene `qty_invoiced`, **no se toca** y se loguea un warning. En órdenes no
+facturadas el comportamiento queda igual. **No repara** las órdenes ya dañadas.
+
+**Port desde 17.0** (17.0.26.93), sin cambios de comportamiento respecto de aquella.
+
+---
+
 ### 30 jul 2026 - fix(orders): Odoo 16/17 nunca ejecutaban el guard de devolucion -> bucle infinito en ventas ML canceladas (v19.0.26.90) [Just 148]
 
 **Sintoma** (prod Just, cuenta 148, Odoo 16.0): desde que una orden ML se cancela DESPUES de facturada
