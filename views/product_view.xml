@@ -166,6 +166,11 @@
                         <field name="meli_family_name" />
                         <field name="meli_family_id" string="Family Id (ML)" readonly="1"/>
                         <field name="meli_description" />
+                        <!-- [#539] La plantilla descriptiva se elige ACA, como el resto de la
+                             configuracion basica. El campo ya existia y la cadena de resolucion
+                             (variante > plantilla > configuracion > compania) tambien: solo
+                             faltaba poder verlo. Pedido de FCA, 26-ago-2026. -->
+                        <field name="meli_mercadolibre_banner" options="{'no_create': True}"/>
                         <field name="meli_category" />
                         <field name="meli_price" />
                         <field name="meli_dimensions" />
@@ -206,6 +211,10 @@
                         <field name="meli_channel_mkt" widget="many2many_tags" />
                         <!--field name="meli_shipping_mode"/>
                         <field name="meli_shipping_method"/-->
+                      </group>
+                      <separator string="Código de barras" colspan="1"/>
+                      <group name="gtin_gen">
+                        <field name="meli_autogenerate_gtin"/>
                       </group>
                       <separator string="Variantes" colspan="1"/>
                       <group name="variantes">
@@ -289,6 +298,12 @@
             <field name="arch" type="xml">
                 <field name="virtual_available" position="after">
                     <field name="meli_stock_update" groups="meli_oerp.group_mercadolibre_manager"/>
+                    <!-- [#539] En la LISTA a propósito: es lo que permite tildarlo de a muchos.
+                         `optional="show"` (no "hide"): con la columna oculta por defecto había que
+                         ir a buscarla al selector de columnas, y como esta lista NO es `editable`
+                         tampoco se podía tildar desde acá. Para el tildado masivo de verdad está
+                         la acción del menú Acción (data/gtin_actions.xml). Medido 26-ago-2026. -->
+                    <field name="meli_autogenerate_gtin" optional="show" groups="meli_oerp.group_mercadolibre_manager"/>
                     <field name="meli_stock_error" invisible="0" groups="meli_oerp.group_mercadolibre_manager"/>
                     <field name="meli_permalink_edit" invisible="0" widget="url" groups="meli_oerp.group_mercadolibre_manager"/>
                 </field>
@@ -474,6 +489,10 @@
                               <field name="meli_family_name" />
                               <!--field name="meli_description_banner_id" on_change="product_on_change_meli_banner( meli_description_banner_id)" /-->
                               <field name="meli_category" options="{'no_create': True}"/>
+                              <field name="meli_category_pending_post" readonly="1"
+                                     invisible="meli_category_pending_post == False"/>
+                              <field name="meli_attributes_input" widget="text"
+                                     placeholder="[{'id': 'BRAND', 'value_name': 'Marca'}]"/>
                               <field name="meli_brand"/>
                               <field name="meli_model"/>
                               <field name="meli_listing_type" />

@@ -30,6 +30,8 @@ import hashlib
 import math
 import requests
 import base64
+import json
+import ast   # [#539] para leer `meli_attributes_input` cuando viene como repr de Python
 import mimetypes
 from urllib.request import urlopen
 
@@ -106,6 +108,97 @@ def _meli_is_valid_gtin(code):
     except Exception:
         return False
 
+def _meli_ean13_from_base(base):
+    """[#539] Completa `base` (dígitos) a un EAN-13 válido: recorta/rellena a 12 y calcula el control.
+
+    El dígito verificador NO es opcional: medido contra ML, un EAN de 13 dígitos con el control mal
+    vuelve `item.attribute.product_identifier.invalid_format`. Es exactamente lo que pasó con
+    7791234567895 (terminaba en 5 y correspondía 8).
+    """
+    digits = "".join(c for c in str(base or "") if c.isdigit())
+    if not digits:
+        return None
+    digits = digits[:12].ljust(12, "0")
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        total += int(d) * (3 if i % 2 == 0 else 1)
+    return digits + str((10 - (total % 10)) % 10)
+
+
+def _meli_parse_attributes_input(raw):
+    """[#539] Parsea el campo `meli_attributes_input` -> lista de dicts {'id':..., 'value_name':...}.
+
+    Acepta JSON **y** el `repr` de Python (comillas simples). No es un capricho: el campo hermano
+    `meli_attributes` se escribe con `str(attributes)` desde siempre, asi que TODAS las instalaciones
+    ya tienen ese formato guardado y la gente copia y pega de ahi. Un parser que solo entienda JSON
+    no puede releer lo que el propio conector escribio.
+
+    Devuelve (lista, error_legible). Si no parsea, lista vacia y el motivo -- nunca una excepcion:
+    un texto mal escrito no puede tumbar una publicacion sin decir por que.
+    """
+    if not raw or not str(raw).strip():
+        return [], None
+    text = str(raw).strip()
+    data = None
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            data = parser(text)
+            break
+        except Exception:
+            continue
+    if data is None:
+        return [], ("No se pudo leer el campo de atributos: no es una lista válida. "
+                    "Tiene que verse así: [{'id': 'BRAND', 'value_name': 'Marca'}]")
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, (list, tuple)):
+        return [], "El campo de atributos tiene que ser una lista de atributos, no un valor suelto."
+    out = []
+    for item in data:
+        if not isinstance(item, dict):
+            return [], ("Cada atributo tiene que ser un bloque con 'id' y 'value_name'. "
+                        "Encontré: %s" % (str(item)[:60],))
+        att_id = item.get("id") or item.get("att_id")
+        if not att_id:
+            return [], "Hay un atributo sin 'id' en la lista."
+        value = item.get("value_name", item.get("value"))
+        if value is None:
+            value = ""
+        out.append({"id": str(att_id).strip(), "value_name": str(value).strip()})
+    return out, None
+
+
+def _meli_gtin_problem(code):
+    """[#539] Devuelve el MOTIVO por el que `code` no sirve como GTIN, o None si es válido.
+
+    Existe para poder decirle al usuario QUE esta mal, no solo que "no es valido". Distingue los dos
+    casos, que se confunden todo el tiempo:
+      - no parece un codigo de barras (no numerico, o largo que no es 8/12/13/14) -> tipico SKU interno
+      - parece uno pero el DIGITO DE CONTROL no cierra -> tipico tipeo, o codigo inventado a mano
+    En el segundo caso decimos cual seria el digito correcto: casi siempre revela el error de tipeo.
+    """
+    if not code:
+        return None
+    s_ = str(code).strip()
+    if not s_.isdigit():
+        return ("'%s' no es un código de barras: tiene caracteres que no son números. "
+                "Parece un SKU o código interno, y eso Mercado Libre no lo acepta como GTIN." % s_)
+    if len(s_) not in (8, 12, 13, 14):
+        return ("'%s' tiene %d dígitos y un código de barras válido tiene 8, 12, 13 o 14 "
+                "(GTIN-8, UPC-A, EAN-13 o GTIN-14). Parece un código interno." % (s_, len(s_)))
+    digits = [int(c) for c in s_]
+    total = 0
+    for i, d in enumerate(reversed(digits[:-1])):
+        total += d * (3 if i % 2 == 0 else 1)
+    expected = (10 - (total % 10)) % 10
+    if expected != digits[-1]:
+        return ("'%s' tiene el largo correcto pero el dígito verificador no cierra: termina en %d "
+                "y debería terminar en %d (el código correcto sería '%s'). Revisá si hay un error de "
+                "tipeo; un código inventado a mano casi nunca pasa esta cuenta."
+                % (s_, digits[-1], expected, s_[:-1] + str(expected)))
+    return None
+
+
 class MyHTMLParser(HTMLParser):
 
     full_text = ""
@@ -167,7 +260,79 @@ class product_template(models.Model):
                         field_name, self.ids, cmds,
                     )
                     del vals[field_name]
-        return super().write(vals)
+
+        # [#539 DISELEC] Propagacion de la CATEGORIA de la plantilla a sus variantes.
+        # El body que se manda a ML se arma con product.meli_category (la VARIANTE), y el unico
+        # lugar que copiaba plantilla->variante lo hacia solo "si la variante estaba vacia". Con la
+        # variante ya cargada (el caso normal: la escribio el alta o la sync desde ML) cambiar la
+        # categoria en la plantilla NO llegaba nunca a la publicacion.
+        # Criterio: se propaga a las variantes que estaban ALINEADAS con la categoria anterior de la
+        # plantilla. Una variante con categoria propia distinta es una eleccion deliberada y se
+        # respeta -- eso es poder manejarlas por separado.
+        propagate_to = self.env['product.product']
+        if 'meli_category' in vals and not self.env.context.get('meli_category_sync'):
+            new_categ = vals.get('meli_category')
+            for tmpl in self:
+                old_categ = tmpl.meli_category.id or False
+                if new_categ == old_categ:
+                    continue
+                for variant in tmpl.product_variant_ids:
+                    if (not variant.meli_category) or (variant.meli_category.id == old_categ):
+                        propagate_to |= variant
+
+        res = super().write(vals)
+
+        if propagate_to:
+            new_categ = vals.get('meli_category')
+            propagate_to.with_context(meli_category_sync=True).write({'meli_category': new_categ})
+            # Las que YA estan publicadas quedan marcadas: ML todavia tiene la categoria vieja.
+            published = propagate_to.filtered(lambda v: v.meli_id)
+            if published:
+                published.with_context(meli_category_sync=True).write({'meli_category_pending_post': bool(new_categ)})
+                _logger.info("meli_category: propagada a %s variante(s), %s publicada(s) quedan "
+                             "pendientes de aplicar en ML: %s", len(propagate_to), len(published),
+                             published.mapped('meli_id'))
+        return res
+
+    @api.onchange('meli_category')
+    def _onchange_meli_category_meli(self):
+        # [#539 DISELEC] Aviso al cambiar la categoria en la plantilla. Un onchange de Odoo solo puede
+        # MOSTRAR un warning (no puede preguntar y esperar la respuesta), asi que el mensaje dice
+        # exactamente que hacer despues: la casilla "Actualizar Categoría" del wizard de Publicar,
+        # que aplica el cambio en ML publicacion por publicacion.
+        for tmpl in self:
+            published = tmpl.product_variant_ids.filtered(lambda v: v.meli_id)
+            if not published or not tmpl.meli_category:
+                continue
+            return {
+                'warning': {
+                    'title': "Categoría de Mercado Libre",
+                    'message': (
+                        "Este producto ya tiene %s publicación(es) en Mercado Libre: %s\n\n"
+                        "El cambio de categoría se aplica a las variantes al guardar, pero en Mercado "
+                        "Libre la publicación sigue con la categoría anterior hasta que la publiques.\n\n"
+                        "Para aplicarla: botón Publicar y marcar la casilla \"Actualizar Categoría\" "
+                        "(o Publicar/Actualizar completo, que ahora también la manda).\n\n"
+                        "Tené en cuenta que Mercado Libre puede rechazar el cambio: hay categorías que "
+                        "exigen atributos que la publicación no tiene (por ejemplo el código universal "
+                        "GTIN), y las publicaciones con ventas o de catálogo tienen restricciones "
+                        "propias. Si lo rechaza, te mostramos el motivo que devuelve Mercado Libre."
+                    ) % (len(published), ", ".join(published.mapped('meli_id')))
+                }
+            }
+
+    def product_template_post_category( self, context=None, meli=None ):
+        # [#539 DISELEC] Empuja SOLO la categoria de las publicaciones de la plantilla.
+        # Espejo de product_template_post_title: corta y devuelve el error del primer variant que
+        # falle (dict con 'error') para que el wizard muestre el motivo que dio ML.
+        _logger.info("base product.template: product_template_post_category")
+        context = context or self.env.context
+        for productT in self:
+            for variant in productT.product_variant_ids:
+                r = variant.product_post_category(meli=meli)
+                if r and isinstance(r, dict) and 'error' in r:
+                    return r
+        return {}
 
     def delete_image_product_now(self):
         for record in self:
@@ -1020,6 +1185,15 @@ class product_template(models.Model):
 
     meli_update_stock_blocked = fields.Boolean(string="Block Update stock",default=False)
     meli_mercadolibre_banner = fields.Many2one("mercadolibre.banner",string="Plantilla Descriptiva")
+    meli_autogenerate_gtin = fields.Boolean(
+        string="Generar código de barras",
+        help="Si el producto no tiene código de barras, el conector genera uno al publicar y lo "
+             "guarda en el campo Código de barras. Se puede tildar de a muchos desde la vista de "
+             "lista.\n\n"
+             "El prefijo y la secuencia se configuran en la configuración de MercadoLibre. Un código "
+             "generado NO queda registrado en GS1: sirve para cumplir el requisito de Mercado Libre "
+             "en las categorías que exigen GTIN, no es el código oficial del fabricante.\n\n"
+             "Nunca pisa un código ya cargado.")
 
     def product_template_permalink(self):
         company = self.env.user.company_id
@@ -1494,8 +1668,18 @@ class product_product(models.Model):
         # realmente. Evita FK violation (meli_category=<id> not present) si meli_get_category
         # devolviera un id huerfano; un id invalido abortaria la transaccion de toda la sync.
         if (mlcatid and self.env["mercadolibre.category"].browse(mlcatid).exists()):
-            product.write( {'meli_category': mlcatid} )
-            product_template.write( {'meli_category': mlcatid} )
+            # [#539 DISELEC] La sync desde ML NO revierte una categoria que el usuario cambio en Odoo
+            # y todavia no publico. Antes escribia siempre en producto Y plantilla, asi que cualquier
+            # importacion desde ML (cron incluido) devolvia la categoria vieja y el cambio se perdia
+            # en silencio: es el "volvi a cambiarla y volvio a tomar la anterior" que reportan.
+            # Lo que ML tiene queda en el log; la eleccion del usuario manda hasta que se publique.
+            if (product.meli_category_pending_post and product.meli_category and product.meli_category.id != mlcatid):
+                _logger.info("_meli_set_category: NO piso la categoria de Odoo (%s) con la de ML (%s):"
+                             " hay un cambio sin publicar en el producto %s (meli_id %s)",
+                             product.meli_category.meli_category_id, category_id, product.id, product.meli_id)
+            else:
+                product.with_context(meli_category_sync=True).write( {'meli_category': mlcatid} )
+                product_template.with_context(meli_category_sync=True).write( {'meli_category': mlcatid} )
 
         if www_cat_id!=False:
             #assign
@@ -2451,6 +2635,10 @@ class product_product(models.Model):
             #publication specific banner
             mlbanner = product.meli_mercadolibre_banner or product_template.meli_mercadolibre_banner
             #configuration banner
+            # [#539] Paso por CATEGORIA, entre lo asignado a mano y el banner global de la config.
+            # Devuelve vacio si nadie cargo categorias en las plantillas => la cadena queda igual
+            # que antes. Pedido de FCA, 26-ago-2026.
+            mlbanner = mlbanner or self.env["mercadolibre.banner"]._meli_banner_for_product(product)
             mlbanner = mlbanner or (config and config.mercadolibre_banner)
             if (mlbanner):
                 #get the text, not the header nor the footer
@@ -3626,6 +3814,54 @@ class product_product(models.Model):
             _logger.exception("meli GTIN required check failed; assuming not required")
             return False
 
+    def _meli_generate_barcode(self, config=None):
+        """[#539] Genera y GUARDA un código de barras para esta variante, si corresponde.
+
+        Sólo actúa si: la plantilla tiene tildado "Generar código de barras", la variante NO tiene
+        barcode, y hay prefijo configurado. **Nunca pisa un barcode existente**: un código cargado a
+        mano es el real y el generado no vale más que ese.
+
+        Se GUARDA en `barcode` (no se calcula al vuelo en cada publicación) para que el código sea
+        estable: un GTIN que cambia entre publicaciones es peor que no tener ninguno.
+        """
+        self.ensure_one()
+        product_tmpl = self.product_tmpl_id
+        if self.barcode:
+            return self.barcode
+        if not (product_tmpl and product_tmpl.meli_autogenerate_gtin):
+            return False
+
+        company = self.env.user.company_id
+        config = config or company
+        prefix = (getattr(config, "mercadolibre_gtin_prefix", False)
+                  or getattr(company, "mercadolibre_gtin_prefix", False) or "")
+        prefix = "".join(c for c in str(prefix) if c.isdigit())
+        if not prefix:
+            _logger.warning("MELI GTIN: no hay prefijo configurado, no se genera para el producto %s", self.id)
+            return False
+
+        seq = getattr(config, "mercadolibre_gtin_sequence_id", False)
+        if seq:
+            correlativo = "".join(c for c in str(seq.next_by_id() or "") if c.isdigit())
+        else:
+            correlativo = str(self.id)
+
+        base = (prefix + correlativo.rjust(12 - len(prefix), "0"))[:12]
+        code = _meli_ean13_from_base(base)
+        if not code or not _meli_is_valid_gtin(code):
+            _logger.error("MELI GTIN: el código generado '%s' no es válido, no se guarda", code)
+            return False
+
+        # Un GTIN repetido en dos productos es peor que no tenerlo: se chequea antes de guardar.
+        if self.search_count([("barcode", "=", code), ("id", "!=", self.id)]):
+            _logger.error("MELI GTIN: el código generado '%s' ya está en otro producto, no se guarda "
+                          "(revisar el prefijo y la secuencia).", code)
+            return False
+
+        self.barcode = code
+        _logger.info("MELI GTIN: generado %s para el producto %s", code, self.id)
+        return code
+
     def _meli_gtin_attribute( self, barcode, meli_category=None ):
         """Decide, category-aware, si mandar el atributo GTIN a MercadoLibre.
 
@@ -4093,6 +4329,13 @@ class product_product(models.Model):
         if product.meli_model==False or len(product.meli_model)==0:
             product.meli_model = product_tmpl.meli_model
 
+        # [#539] Si la plantilla lo pide y el producto no tiene código de barras, se genera acá:
+        # justo antes de decidir si mandamos el GTIN, y sólo en ese caso. Guarda el código en
+        # `barcode`, así queda estable para las próximas publicaciones y visible para el usuario.
+        if (not product.barcode and product_tmpl.meli_autogenerate_gtin
+                and not product_tmpl.meli_pub_as_variant and "GTIN" not in attributes_ids):
+            product._meli_generate_barcode(config=config)
+
         if (product.barcode and not product_tmpl.meli_pub_as_variant and not "GTIN" in attributes_ids):
             # category-aware: solo mandar GTIN si el barcode es un EAN/GTIN válido
             # (evita el 400 'Product Identifier [GTIN] invalid format' cuando el
@@ -4211,6 +4454,53 @@ class product_product(models.Model):
         #_product_post_set_quantity
         product.meli_available_quantity = product._meli_available_quantity(meli=meli,config=config)
 
+        # [#539] Atributos cargados a mano en JSON, SOLO en la primera publicación.
+        # Es el camino para carga masiva desde Excel: `meli_attributes_input` es texto, así que se
+        # importa y se edita en lote, sin tener que crear un product.attribute.value por cada valor.
+        # Va ANTES del mapeo a propósito: lo que el usuario cargó para ESTE producto gana sobre la
+        # regla general. Y después de las líneas de atributo, que son lo más explícito de todo.
+        if not product.meli_id and getattr(product, "meli_attributes_input", False):
+            _input_atts, _input_error = _meli_parse_attributes_input(product.meli_attributes_input)
+            if _input_error:
+                # No se publica en silencio ignorando lo que el usuario cargó.
+                return warningobj.info(title='MELI ATRIBUTOS', message=_input_error, message_html="")
+            for _a in _input_atts:
+                if _a["id"] in attributes_ids:
+                    continue
+                attributes_ids[_a["id"]] = _a["value_name"]
+                attributes.append(_a)
+                _logger.info("MELI atributos (JSON): %s = %s", _a["id"], _a["value_name"])
+
+        # [#539] Atributos que vienen del MAPEO campo de Odoo -> atributo de ML.
+        # COMPLETA, no reemplaza: lo que ya resolvieron las líneas de atributo de Odoo manda, porque
+        # es lo que el usuario cargó explícitamente en ESE producto; el mapeo es la regla general.
+        # Va ANTES del guard de GTIN a propósito: un GTIN que llegue por mapeo también se valida.
+        try:
+            _mapped = self.env["meli_oerp.attribute.mapping"]._meli_attributes_from_mapping(
+                product, meli_category=product.meli_category, already=list(attributes_ids.keys()))
+            for _m in _mapped:
+                attributes_ids[_m["id"]] = _m["value_name"]
+                attributes.append(_m)
+        except Exception:
+            # Defensivo: un mapeo mal cargado NO puede impedir publicar.
+            _logger.exception("MELI mapeo de atributos: falló, se publica sin los atributos mapeados")
+
+        # [#539 DISELEC] GTIN inválido cargado como LÍNEA DE ATRIBUTO.
+        # `_meli_is_valid_gtin` protegía sólo el camino del campo `barcode`; un GTIN cargado como
+        # atributo ("Código universal de producto") viajaba a ML sin validar y volvía
+        # `item.attribute.product_identifier.invalid_format`, ilegible para el usuario. Y ese es el
+        # camino que usan los clientes a los que les enseñamos a cargar atributos a mano.
+        # Se frena ACA, con el motivo concreto, en vez de mandar basura a ML.
+        for _att in (attributes or []):
+            if isinstance(_att, dict) and _att.get("id") == "GTIN":
+                _problem = _meli_gtin_problem(_att.get("value_name"))
+                if _problem:
+                    _logger.warning("MELI GTIN invalido en linea de atributo: %s", _problem)
+                    return warningobj.info(
+                        title='MELI GTIN',
+                        message="El código universal de producto (GTIN) no es válido: " + _problem,
+                        message_html="" )
+
         #_product_post_set_body
         body = {
             "category_id": product.meli_category.meli_category_id or '0',
@@ -4248,9 +4538,15 @@ class product_product(models.Model):
             "plain_text": product.meli_description or '',
         }
         mlbanner = product.meli_mercadolibre_banner or product_tmpl.meli_mercadolibre_banner
+        # [#539] Paso por CATEGORIA, entre lo asignado a mano y el banner global de la config.
+        # Devuelve vacio si nadie cargo categorias en las plantillas => la cadena queda igual
+        # que antes. Pedido de FCA, 26-ago-2026.
+        mlbanner = mlbanner or self.env["mercadolibre.banner"]._meli_banner_for_product(product)
         mlbanner = mlbanner or (config and config.mercadolibre_banner)
         if (mlbanner):
-            bodydescription["plain_text"] = mlbanner.get_description(product=product)
+            # [#539] `attributes` va para que la plantilla pueda nombrar {attr.ATT_ID}: el valor
+            # YA resuelto por el mapeo, sin mantener una segunda traducción del mismo dato.
+            bodydescription["plain_text"] = mlbanner.get_description(product=product, attributes=attributes)
 
 
         # _logger.info( body )
@@ -4292,9 +4588,38 @@ class product_product(models.Model):
                 "pictures": [],
                 "video_id": product.meli_video or '',
             }
+
+            # [#539 DISELEC] CATEGORIA en el update. Este body se reconstruye desde cero para el
+            # PUT y no incluia category_id (solo viajaba en el ALTA): cambiar la categoria en Odoo y
+            # apretar Publicar no cambiaba nada en ML, y no avisaba -- fallaba en silencio.
+            # Se manda SOLO cuando difiere de la que ML tiene hoy (productjson), para no tocar
+            # publicaciones sanas. Si ML la rechaza (categoria que exige atributos que faltan, item
+            # con ventas, catalogo...) el error sale por el camino de error de siempre, con el motivo
+            # textual de ML.
+            _odoo_categ = (product.meli_category and product.meli_category.meli_category_id) or ''
+            _ml_categ = (productjson and productjson.get("category_id")) or ''
+            if _odoo_categ and _odoo_categ != _ml_categ:
+                body["category_id"] = _odoo_categ
+                _logger.info("update post: CAMBIO DE CATEGORIA %s -> %s (item %s)",
+                             _ml_categ or "(desconocida)", _odoo_categ, product.meli_id)
+
             if (config and "mercadolibre_user_product_seller" in config._fields ):
                 if (config.mercadolibre_user_product_seller):
-                    body["family_name"] = product.meli_family_name or product.meli_title or ''
+                    # [#539 DISELEC] Con la family YA creada, ML rechaza family_name en el
+                    # PUT /items/{id} aunque el item no tenga ventas:
+                    #   400 BODY_INVALID_FIELDS cause 374 "The field family name is invalid"
+                    # El nombre de la family se cambia en el USER PRODUCT (/user-products/{id}), no
+                    # en el item. Aca se mandaba SIEMPRE, sin mirar nada. Se mide contra productjson
+                    # (lo que dice ML), no contra product.meli_user_product_id: ese campo puede estar
+                    # vacio en Odoo teniendo ML el user product asignado.
+                    _up_id = (productjson and (productjson.get('user_product_id') or
+                                               productjson.get('family_id'))) or False
+                    if _up_id:
+                        _logger.info("update post: NO mando family_name -- el item %s ya pertenece al "
+                                     "user product %s. El nombre de la family se cambia en "
+                                     "/user-products, no en el item.", product.meli_id or "?", _up_id)
+                    else:
+                        body["family_name"] = product.meli_family_name or product.meli_title or ''
                 else:
                     body["title"] = product.meli_family_name or product.meli_title or ''
 
@@ -4640,6 +4965,13 @@ class product_product(models.Model):
         #last modifications if response is OK
         if "id" in rjson:
             product.write( { 'meli_id': rjson["id"]} )
+            # [#539 DISELEC] Si el publicar/actualizar llevaba el cambio de categoria y ML no lo
+            # rechazo, la publicacion ya esta en la categoria nueva: se apaga la marca de pendiente
+            # y la sincronizacion desde ML vuelve a mandar sobre este campo.
+            if body.get("category_id"):
+                _logger.info("update post: categoria aplicada en ML (%s) para el item %s",
+                             body.get("category_id"), rjson.get("id"))
+                product.with_context(meli_category_sync=True).write({'meli_category_pending_post': False})
             if ("variations" in rjson):
                 for ix in range(len(rjson["variations"]) ):
                     _var = rjson["variations"][ix]
@@ -5105,11 +5437,71 @@ class product_product(models.Model):
             _logger.info("Posted title ok (single) /items/"+str(meli_id)+": "+str(title))
         return {}
 
+    def product_post_category(self, context=None, meli=None):
+        # [#539 DISELEC] Empuja SOLO la categoria de la publicacion a ML (no el producto completo).
+        # Espejo exacto de product_post_title: PUT /items/{meli_id} { 'category_id': <MLXNNNN> }.
+        #
+        # POR QUE EXISTE: el body de update de product_post() NO incluia category_id (solo viaja en el
+        # ALTA), asi que cambiar la categoria en Odoo y apretar Publicar no cambiaba nada en ML y no
+        # avisaba. Ver product_post(): ahora tambien la manda cuando difiere.
+        #
+        # ML PUEDE RECHAZARLO y es esperable: la categoria de un item publicado solo se puede cambiar
+        # bajo sus reglas (tipicamente sin ventas y fuera de catalogo) y la categoria destino puede
+        # exigir atributos que el item no tiene (p.ej. GTIN obligatorio en las hojas de cartas TCG).
+        # En ese caso devolvemos el rjson con 'error' para que el wizard lo muestre TAL CUAL: el
+        # motivo es de ML, no nuestro. Devuelve {} en OK.
+        context = context or self.env.context
+        company = get_company_selected( self, context=context )
+
+        product = self
+        product_tmpl = self.product_tmpl_id
+
+        if not product.meli_id:
+            return {}
+
+        category_id = (product.meli_category and product.meli_category.meli_category_id) or \
+                      (product_tmpl and product_tmpl.meli_category and product_tmpl.meli_category.meli_category_id)
+        if not category_id:
+            _logger.error("product_post_category: sin categoria en Odoo para meli_id:"+str(product.meli_id))
+            return {}
+
+        if not meli:
+            meli = self.env['meli.util'].get_new_instance(company)
+            if meli.need_login():
+                return meli.redirect_login()
+
+        meli_id = product.meli_id
+
+        _logger.info("product_post_category (single) /items/"+str(meli_id)+" category_id:"+str(category_id))
+        response = meli.put_mini("/items/"+str(meli_id), { 'category_id': category_id }, {'access_token':meli.access_token})
+        if response:
+            rjson = response.json()
+            if rjson and "error" in rjson:
+                _logger.error("product_post_category error /items/"+str(meli_id)+": "+str(rjson))
+                return rjson
+            _logger.info("Posted category ok (single) /items/"+str(meli_id)+": "+str(category_id))
+            # Aplicada en ML: se apaga la marca de "cambiada en Odoo y todavia sin publicar".
+            product.with_context(meli_category_sync=True).meli_category_pending_post = False
+        return {}
+
     def get_title_for_meli(self):
         return self.name
 
     def action_category_predictor(self):
         return self.product_tmpl_id.action_category_predictor()
+
+    def write(self, vals):
+        # [#539 DISELEC] Si alguien cambia la categoria de una publicacion ya publicada, se marca
+        # "cambiada sin publicar": ML todavia tiene la anterior. Esa marca es la que impide que la
+        # sincronizacion desde ML la revierta antes de que llegue a aplicarse (_meli_set_category).
+        # El contexto meli_category_sync distingue lo que escribe el conector de lo que cambia una
+        # persona: el conector nunca marca.
+        if 'meli_category' in vals and not self.env.context.get('meli_category_sync'):
+            for product in self:
+                if product.meli_id and vals.get('meli_category') != (product.meli_category.id or False):
+                    vals = dict(vals, meli_category_pending_post=bool(vals.get('meli_category')))
+                    break
+        return super().write(vals)
 
     @api.onchange('meli_id') # if these fields are changed, call method
     def change_meli_id(self):
@@ -5118,6 +5510,12 @@ class product_product(models.Model):
                 p.product_tmpl_id.update_meli_ids()
 
     #typical values
+    meli_category_pending_post = fields.Boolean(string='Categoría cambiada sin publicar',
+        help="Se marca sola cuando alguien cambia la categoría en Odoo y la publicación en Mercado "
+             "Libre todavía tiene la anterior. Mientras esté marcada, la sincronización desde ML NO "
+             "pisa la categoría elegida (antes la revertía y el cambio se perdía en silencio). "
+             "Se apaga sola cuando la categoría se aplica en ML.",
+        default=False, copy=False)
     meli_title = fields.Char(string='Nombre del producto en Mercado Libre',size=256)
     meli_family_name = fields.Char(string='Nombre de la familia en el user product en Mercado Libre',size=256)
     meli_family_id = fields.Char(string='ID de familia ML (user_product_seller)',size=128,index=True)
@@ -5170,6 +5568,19 @@ class product_product(models.Model):
     meli_sub_status = fields.Char( compute=product_get_meli_update, size=128, string='Sub status',help="Sub Estado del producto en ML" )
 
     meli_attributes = fields.Text(string='Atributos')
+    meli_attributes_input = fields.Text(
+        string='Atributos a publicar (JSON)',
+        help="Atributos para mandar a Mercado Libre, en formato JSON. Pensado para carga MASIVA: "
+             "es un campo de texto, así que se importa desde un Excel y se edita en lote desde la "
+             "lista.\n\n"
+             "Ejemplo:\n"
+             "[{'id': 'BRAND', 'value_name': 'Magic: The Gathering'}, "
+             "{'id': 'EDITION', 'value_name': 'Marvel Super Heroes'}]\n\n"
+             "Sólo se usa en la PRIMERA publicación (mientras el producto no tenga publicación en "
+             "ML). Completa a los atributos que ya salen de las líneas de atributo y del mapeo, "
+             "sin pisarlos.\n\n"
+             "No confundir con 'Atributos' (el campo de al lado), que es de sólo lectura: refleja lo "
+             "que se mandó en la última publicación.")
 
     meli_model = fields.Char(string="Modelo",size=256)
     meli_brand = fields.Char(string="Marca",size=256)
