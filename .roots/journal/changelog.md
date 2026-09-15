@@ -63,6 +63,15 @@ Requiere actualizar el módulo (`-u meli_oerp`).
    deja constancia en el registro del servidor. En órdenes todavía no facturadas nada cambia.
    *Medido en un cliente AR: 61 de 347 facturas de MercadoLibre con flete quedaron descuadradas en siete
    semanas, por $1.673.959,97.*
+## Versión 19.0.26.95 — El diagnóstico de stock ya no puede decir "todo bien" cuando no revisó nada [#535 Score]
+19 ago 2026
+
+**Cambios:**
+
+1. **Cuando MercadoLibre rechaza una consulta, ahora se ve.** El diagnóstico de stock le pregunta a MercadoLibre por cada publicación sospechosa. Si ML respondía con un rechazo (por ejemplo *403: la publicación pertenece a otro vendedor*), esa respuesta **se leía como si fuera una publicación normal sin nada para corregir** y quedaba anotada como *"sin acción"*. Con varias cuentas de ML en la misma base eso significaba que **todas** las publicaciones de una cuenta podían ser rechazadas y la revisión terminaba informando **cero problemas**. Ahora cada rechazo se cuenta, se registra con su motivo y aparece en el resumen del historial de la cuenta.
+2. **Una revisión que no revisó nada deja de figurar como exitosa.** El resultado del diagnóstico ahora informa cuántas publicaciones se consultaron de verdad, cuántas rechazó MercadoLibre y con qué código, para que la página de **CRONs** de la cuenta pueda mostrarla como *advertencia* con el motivo escrito, en lugar de un tilde verde con 0 ítems procesados. *(La corrección que usa este dato para marcar la ejecución viaja en el módulo `meli_oerp_multiple`.)*
+
+*Medido en un cliente MX con dos cuentas de ML en la misma base: 134 publicaciones de la segunda cuenta se consultaban con el token de la primera y devolvían 403; el proceso terminaba en verde con 0 ítems procesados, así que el problema estuvo semanas a la vista sin verse.*
 
 Requiere actualizar el módulo (`-u meli_oerp`).
 
@@ -92,11 +101,40 @@ Requiere actualizar el módulo (`-u meli_oerp`).
 *Detectado en una cuenta MX con 3.700 publicaciones: 209 movimientos validados con demora en 60 días quedaban fuera de la sincronización, y publicaciones con la fecha congelada desde hacía semanas.*
 
 Requiere actualizar el módulo (`-u meli_oerp`).
+## Versión 19.0.26.88 — Queda constancia cuando la importación de pedidos corta por el tope configurado
+3 ago 2026
+
+**Cambios:**
+
+1. El proceso de importación de pedidos toma las ventas **de la más nueva a la más vieja** y, cuando
+   está configurado el *Límite de órdenes por cron*, procesa sólo esa cantidad y **no sigue** con el
+   resto. Eso es intencional —el parámetro está para acotar el trabajo por ciclo y no reventar los
+   límites de la API de MercadoLibre—, pero hasta ahora **no dejaba ningún rastro**: si una venta
+   quedaba fuera de esa ventana, nadie se enteraba. Ahora, cada vez que la ventana se corta, queda un
+   **aviso en el registro del servidor** con cuántas ventas informa MercadoLibre, cuántas se
+   procesaron, y el recordatorio de que las que quedan afuera dependen del proceso
+   *MELI: reintentar facturas que quedaron sin emitir*.
+2. **El comportamiento del proceso no cambia**: se documentó la decisión y se agregó la constancia.
+   La red de seguridad para las ventas que quedan afuera (y cuya factura falló) es el nuevo reintento
+   de facturación de `meli_oerp_accounting`.
+
+**Detalle técnico:** `mercadolibre.orders.orders_query_iterate` — cuando hay `orders_limit`,
+`offset_next` sigue en 0 (tope deliberado: paginar ahí invertiría el sentido del campo y haría que un
+seller con miles de órdenes recorriera todo su historial en páginas del tamaño del límite en cada
+ciclo). Se agrega un `_logger.warning` de truncamiento.
+
+---
 
 ## Versión 19.0.26.87 — El costo de envío ya no se pierde de la orden [Elvimarta #508]
 27 jul 2026
 
 **Cambios:** al recalcular el flete, el conector reescribía la línea de envío con el mecanismo de Odoo, que primero **borra** la línea y recién después la vuelve a crear. Si en ese momento la venta no tenía transportista asignado, o la recreación fallaba (compañía incompatible, orden ya facturada, impuestos), el borrado quedaba hecho y la venta se quedaba **sin flete y sin transportista**: el costo de envío no llegaba nunca a la factura, y el error se descartaba en silencio. Ahora, sin transportista válido no se toca la línea (solo se actualiza su precio) y la reescritura va dentro de un punto de guardado, de modo que si algo falla se deshace el borrado y la línea original sobrevive; los fallos quedan registrados en el log con la venta involucrada. *Detectado en un cliente AR: 47 órdenes sin flete en 7 semanas, 20 de ellas facturadas por debajo de lo cobrado al comprador.*
+## Versión 19.0.26.86 — Se elimina la foto fantasma que se agregaba en cada publicación
+23 jul 2026
+
+**Cambios:**
+
+1. Se corrige un problema por el cual el conector agregaba una **imagen extra inválida** en cada publicación de MercadoLibre (una segunda foto "basura"), lo que en algunos casos impedía activar la publicación. Ahora la imagen de logo sólo se agrega si realmente está configurada.
 
 ## Versión 19.0.26.85 — Aviso de mensajes del comprador sin leer en las órdenes de ML [#499 Deco/KPI]
 22 jul 2026
@@ -138,6 +176,14 @@ Feature genérica, promovida desde el cliente Deco/KPI (cuenta 526). Requiere ac
    cascada `InFailedSqlTransaction`.
 2. Cierra además la **causa raíz** del error de clave foránea de categoría (`meli_category`) que
    aparecía al importar (#410): la categoría recién creada ya no se pierde en un rollback silencioso.
+## Versión 19.0.26.82 — El diagnóstico de stock reactiva de forma EXPLÍCITA las publicaciones pausadas con stock
+17 jul 2026
+
+**Cambios:**
+
+1. Cuando el diagnóstico de stock (la red de seguridad que corre al terminar el cron de stock) detecta —consultando el estado **en vivo** a MercadoLibre— una publicación **pausada** que **sí tiene stock** en Odoo, ahora la **reactiva de forma explícita** (la pone "activa") además de reenviarle el stock.
+2. Antes se dependía de un estado guardado localmente que a veces quedaba **desactualizado** (Odoo la creía "activa" cuando MercadoLibre ya la había pausado por falta de stock): en ese caso el stock se reenviaba pero la publicación **seguía pausada**. Ahora, al confirmar el estado real contra MercadoLibre, se garantiza que vuelva a quedar activa.
+3. Sigue respetando el **bloqueo manual** de stock (productos marcados como "no actualizar stock" no se tocan) y es **idempotente**: si la publicación ya estaba activa, no genera ningún cambio.
 
 ## Versión 19.0.26.79 — Al publicar, se envían a MercadoLibre las dimensiones y los impuestos del producto [#424/#474 Deco/KPI]
 16 jul 2026

@@ -95,6 +95,53 @@ savepoint del fix de #508 (26.48, 28-jul) — que **sí funciona**: en producci�
 facturadas el comportamiento queda igual. **No repara** las órdenes ya dañadas.
 
 **Port desde 17.0** (17.0.26.93), sin cambios de comportamiento respecto de aquella.
+### 19 ago 2026 - fix(stock-diag): una respuesta de ERROR de ML se leia como "sin accion" -> corrida VERDE que no reviso nada (19.0.26.95) [#535 Score 361/499]
+
+**Sintoma** (prod Score MX, Odoo 19, 2 cuentas ML + 3 companias en la misma base): el cron
+`ir_cron_meli_stock_diagnostic` terminaba `state=success` con `items_processed=0` corrida tras
+corrida, mientras 134 publicaciones de la cuenta WodPro seguian desactualizadas.
+
+**Causa raiz** (leida en el codigo, no inferida del changelog):
+1. `cron_meli_stock_diagnostic` (meli_oerp_multiple) itera cuenta por cuenta pero llamaba
+   `company.meli_stock_diagnostic()` **sin `meli=`** -> `meli_stock_diagnostic` caia a
+   `get_new_instance(company)`, y en multi-cuenta esa funcion **descarta la company** cuando no
+   recibe `account`: recorre `env.user.company_ids` y se queda con la **ultima** conectada (el
+   bucle no tiene `break`). Los items de una cuenta se consultan con el token de OTRA -> **403**.
+2. El 403 era **invisible**: `meli.get()` devuelve `self` (el objeto API), siempre truthy, asi que
+   el guard `if not response: continue` no se dispara nunca. El body de error de ML llega como
+   un dict con `error='forbidden'` y `status=403`, y `ml_status = rjson.get('status')` valia
+   **403 (int)**, que no matchea ninguna rama (`'paused'`/`'active'`) -> caia en el `else` final y
+   se anotaba `"sin accion (status=403)"`. Cero acciones, cero errores, `success`.
+
+**Fixes (este modulo):**
+- **F1** deteccion explicita del body de error de ML **antes** del arbol de `ml_status`: si `status`
+  es un `int` >= 400 o viene `error`, se cuenta en `api_errors` / `api_errors_by_status`, se loguea
+  `WARNING` con el motivo y se anota en el detalle del chatter con el codigo real. En una respuesta
+  buena `status` es un **string** (`active`/`paused`/`closed`/...), nunca numerico, por eso alcanza
+  con distinguir el tipo. Se normaliza tambien el caso en que ML manda el status como **string de
+  digitos** (`"403"`), que es lo que ya contemplaba `connection_binding` con `int(fetch_status)`.
+  **Verificado con la condicion real** contra 12 respuestas de ML (403 forbidden, 403
+  PA_UNAUTHORIZED sin clave `error`, 401, 404, 500, 429 con body vacio, y 5 respuestas sanas):
+  12/12, sin falsos positivos sobre items sanos.
+- **F2** `meli_stock_diagnostic` devuelve claves nuevas (aditivas, no rompen llamadores viejos):
+  `items_to_check`, `items_checked_ok`, `api_errors`, `api_errors_by_status`, `diag_state`
+  ('success'|'warning') y `diag_message` con el texto del motivo. El cron de `meli_oerp_multiple`
+  las usa para marcar la ejecucion.
+- **F3** comentario en el fallback `get_new_instance(company)` documentando la trampa multi-cuenta:
+  los llamadores multi-cuenta **deben** pasar `meli=` ya resuelto para SU cuenta.
+
+**Lo que este fix NO hace:** no toca el wizard de publicacion masiva (`mercadolibre.product.post`),
+que tiene el mismo defecto de familia por otro camino, ni desvara las publicaciones que ya quedaron
+en un estado de error.
+
+**Regla que aplica:** [[cero-resultados-no-distingue-falla-de-nada-que-hacer]] — un "0 procesados"
+tiene que decir **por que** es 0.
+
+**Numeracion:** las 4 versiones quedan en `.26.95` (convergencia horizontal, [[sources-align]]:
+el manifest toma el numero mas alto). Venian desalineadas: 16.0 en .94, 18.0 en .93, 17.0/19.0 en .92.
+
+**Archivos:** `models/company.py` (`meli_stock_diagnostic`).
+**Companero obligatorio:** `meli_oerp_multiple` (el cron que pasa la cuenta correcta y consume el reporte).
 
 ---
 
@@ -178,6 +225,38 @@ dias** en una sola cuenta), reservar/desreservar, cancelar, editar cantidad.
 **Verificacion:** `ast.parse` OK en las 4 versiones. Convergencia 16=17=18=19 (16.0 conserva su
 `_sql_constraints` propio; el resto byte-identico). Branch `claude/stock-queue-invariant-2687-<ver>`.
 **Merge a la rama de deploy y deploy a clientes: NO - lo confirma FCA aparte.**
+### 23 jul 2026 — fix(publicación): foto fantasma `{'source':'None'}` en cada item ML (v19.0.26.86) `[flota/Koreautos]`
+
+El campo `meli_imagen_logo` tenía `default='None'` (el **string** `'None'`, truthy), así que la
+guarda `if product.meli_imagen_logo:` daba True y agregaba `{'source': 'None'}` como foto extra en
+**cada** publicación (verificado en Koreautos: 19.502 product.product con `meli_imagen_logo='None'` →
+2da foto basura "O-ES.jpg" que trababa la activación). Fix: (1) guarda ampliada
+`if product.meli_imagen_logo and product.meli_imagen_logo not in ('None','False',False,''):`; (2)
+`default=False` para que los registros nuevos no nazcan con `'None'` truthy. Sin migración obligatoria
+(la guarda neutraliza los `'None'` existentes al publicar; opción de limpiar `'None'→NULL` en post-init).
+
+**Archivos:** `models/product.py`. **Verificación:** py_compile OK. Convergencia 16≡17≡18≡19.
+Branch `claude/fix-meli-logo-extra-image-19.0` (push automático). Merge a deploy + prod: NO (a confirmar).
+
+### 3 ago 2026 — `orders_query_iterate`: el truncamiento de la ventana deja rastro (decisión sobre `offset_next`) — v19.0.26.88 `[#427]`
+
+`models/orders.py` (`mercadolibre.orders.orders_query_iterate`).
+
+- *Contexto:* con `mercadolibre_cron_orders_limit` seteado, `offset_next = 0` ⇒ **no se pagina** y sólo
+  se procesan las N ventas más nuevas (`sort=date_desc`). Con `limit=10` y 25-35 ventas/día la ventana
+  efectiva es de ~6-10 h; lo que cae afuera **no se vuelve a mirar nunca**. Es lo que dejaba sin
+  reintento a las ventas cuya factura falló (#427 Legión Extranjera).
+- *Decisión — NO se cambia:* el campo está declarado como *"cantidad máxima de órdenes a procesar por
+  ejecución del cron"*, o sea un **tope deliberado**. Paginar ahí invertiría el sentido del campo:
+  un seller con miles de órdenes recorrería su historial completo en páginas del tamaño del límite en
+  **cada ciclo** (con `limit=10` y 5.000 órdenes: 500 llamadas por corrida), reventando el rate-limit
+  y el tiempo del cron. Se eligió la **red de seguridad acotada** (reintento de N ventas concretas,
+  `meli_oerp_accounting` v26.45) antes que una paginación no acotada.
+- *Lo que sí cambia:* `_logger.warning` cuando la ventana se trunca (total que informa ML, cuántas se
+  procesan y de qué depende el rescate de las que quedan afuera). Antes el truncamiento era
+  **completamente invisible** en el log.
+
+---
 
 ### 19 jul 2026 — feat(promoción cliente→source): comprador + zona del receiver buscables en sale.order (v19.0.26.83) [#404 Deco]
 
@@ -210,6 +289,24 @@ con `InFailedSqlTransaction` en cascada; el savepoint aísla el fallo.
 Rama `claude/meli-solsun-savepoints-19.0`. Push del `claude/*` hecho; SIN merge a deploy.
 
 ---
+### 17 jul 2026 — hardening(stock): meli_stock_diagnostic reactiva pausadas-con-stock con status=active explícito [MEJORA #2]
+
+**Contexto:** en la rama `ml_status == 'paused' and odoo_qty > 0` de `meli_stock_diagnostic` (que ya
+confirmó `paused` por API VIVA) se llamaba sólo a `product.product_post_stock(meli=meli)`. La
+reactivación dentro de `product_post_stock` está condicionada al campo LOCAL `meli_status`
+(product.py ~L4908: `... _ml_status_now=="paused" ...`), que puede quedar **stale='active'** cuando ML
+auto-pausó por `out_of_stock` → el stock se surtía pero la publicación **quedaba pausada**.
+
+**Fix:** `meli_oerp/models/company.py` (v19.0.26.82), branch paused del diagnóstico:
+1. Se mantiene el push de stock (`product_post_stock`) — no deja de surtir.
+2. Se agrega llamada **explícita** `product.product_meli_status_active(meli=meli)` tras el push,
+   apoyándose en el estado VIVO de ML (paused, confirmado arriba) en vez del gate de campo local.
+3. Respeta `meli_update_stock_blocked` (ya chequeado en el `if` previo) y **NO** desbloquea
+   (`product_meli_unblock`). Idempotente: PUT status=active sobre item ya activo es inocuo.
+4. `except` acotado: re-propaga errores de serialización (`pgcode` 40001/40P01) al handler del cron;
+   cualquier otro error de activación se loguea y el stock igual quedó surtido (acción "parcial").
+
+**Verificación:** `python3 -m py_compile` OK en las 4 versiones. Sin merge/deploy.
 
 ### 14 jul 2026 — hardening(meli_util): forward-port firma extra_headers/**kwargs consistente en get/post/put/delete `[ERROR-008]`
 
