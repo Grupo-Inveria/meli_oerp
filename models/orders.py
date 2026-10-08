@@ -539,6 +539,50 @@ class sale_order(models.Model):
     ('cancel','Entrega Cancelado'),
     ],compute=_ml_shipping_status)
 
+    # [#643 Shoppy 502] El conector escribe partner_shipping_id DESPUES de confirmar la venta
+    # (la direccion de entrega de ML llega con el shipment). Odoo 16 NO propaga ese cambio al
+    # grupo de abastecimiento ni a los albaranes abiertos (sale_stock solo agenda una actividad
+    # de aviso): el albaran y sus movimientos quedan con el contacto viejo (el comprador).
+    # Si despues se agrega una linea al pedido, el movimiento nuevo nace con el contacto nuevo,
+    # `stock.move._assign_picking` (stock_move.py:1223) ve contactos distintos y vacia el
+    # Contacto del albaran, y `stock.picking.write` propaga ese False a todos sus movimientos.
+    # Aca se sincroniza, solo en ventas ML y solo lo que todavia llevaba el valor viejo
+    # (un contacto cargado a mano en el albaran no se pisa).
+    def write(self, vals):
+        old_shipping = {}
+        if vals.get('partner_shipping_id'):
+            old_shipping = {o.id: o.partner_shipping_id.id for o in self if o.meli_order_id}
+        res = super(sale_order, self).write(vals)
+        if old_shipping:
+            self._meli_sync_shipping_partner_to_stock(old_shipping)
+        return res
+
+    def _meli_sync_shipping_partner_to_stock(self, old_shipping):
+        for order in self:
+            old_id = old_shipping.get(order.id)
+            new = order.partner_shipping_id
+            if not new or old_id == new.id:
+                continue
+            try:
+                with self.env.cr.savepoint():
+                    group = order.procurement_group_id if 'procurement_group_id' in order._fields else False
+                    if group and group.partner_id.id == old_id:
+                        group.sudo().write({'partner_id': new.id})
+                    pickings = order.picking_ids.filtered(
+                        lambda p: p.state not in ('done', 'cancel') and p.partner_id.id == old_id)
+                    # picking.write(partner_id) propaga el contacto a sus movimientos (stock_picking.py:837)
+                    if pickings:
+                        pickings.sudo().write({'partner_id': new.id})
+                    # movimientos abiertos sin albaran (no los alcanza el write del albaran)
+                    loose = order.order_line.move_ids.filtered(
+                        lambda m: not m.picking_id and m.state not in ('done', 'cancel')
+                        and m.partner_id.id == old_id)
+                    if loose:
+                        loose.sudo().write({'partner_id': new.id})
+            except Exception as e:
+                _logger.warning("MELI sync partner_shipping_id -> albaranes SO %s (id=%s): %s",
+                                order.name, order.id, e)
+
     def action_confirm(self):
         #_logger.info("meli order action_confirm: " + str(self.mapped("name")) )
         res = super(sale_order,self).action_confirm()
@@ -3251,6 +3295,7 @@ class mercadolibre_orders(models.Model):
 
         partner_id = False
         partner_shipping_id = False
+        partner_invoice_id = False  # #601: si la orden llega sin buyer no se asignaba y abortaba en la asignación de contactos
 
         if not 'buyer' in order_json or not 'name' in order_json['buyer'] or not 'first_name' in order_json['buyer']:
             #_logger.info("Buyer not present, fetch order")
@@ -4661,7 +4706,6 @@ class mercadolibre_orders(models.Model):
             if ("logistic_type" in order_json["shipping"]):
                 order_fields['shipment_logistic_type'] = order_json["shipping"]["logistic_type"]
                 meli_order_fields["meli_shipment_logistic_type"] = order_json["shipping"]["logistic_type"]
-                meli_order_fields["meli_shipment_free"] = order_json["shipping"]["free_shipping"]
 
             if ("cost" in order_json["shipping"]):
                 order_fields["shipping_cost"] = float(order_json["shipping"]["cost"])
@@ -4704,6 +4748,9 @@ class mercadolibre_orders(models.Model):
                 del meli_order_fields["pricelist_id"]
             #_logger.info(meli_order_fields)
             sorder.meli_fix_team( meli=meli, config=config )
+            for k in [k for k in meli_order_fields if k not in sorder._fields]:
+                _logger.warning("MELI: sale.order sin campo '%s', se descarta", k)
+                del meli_order_fields[k]
             sorder.write( meli_order_fields )
             sorder.meli_fix_team( meli=meli, config=config )
         else:
@@ -4747,6 +4794,9 @@ class mercadolibre_orders(models.Model):
                 # Sanitize vals for compatibility with auditlog (copy.deepcopy)
                 safe_meli_fields = {}
                 for k, v in meli_order_fields.items():
+                    if k not in saleorder_obj._fields:
+                        _logger.warning("MELI: sale.order sin campo '%s', se descarta", k)
+                        continue
                     if hasattr(v, '_ids'):
                         safe_meli_fields[k] = v.id if len(v) == 1 else v.ids
                     else:
@@ -5147,6 +5197,7 @@ class mercadolibre_orders(models.Model):
                                 if ( tax_names_equivalent(txid.name,tax_iva_name) ):
                                     tax_iva_id = txid
 
+                        tid = None  # #601: si la línea no trae impuestos el for no corre y abajo se usaba tid sin definir
                         for tid in saleorderline_item_ids[tax_field]:
 
                             if (tid.company_id.id!=sorder.company_id.id 

@@ -208,6 +208,10 @@ class res_company(models.Model):
             # Cron "Get Meli State" en DB neutralizada: no-op. No leer ni refrescar,
             # para no arriesgar la rotación del token de PRODUCCIÓN.
             self.env['meli.util']._meli_log_neutralized_skip()
+            # Es tambien el compute de mercadolibre_state: un compute que sale sin
+            # asignar rompe la edicion de la empresa (auditoria 542, #661).
+            for company in self:
+                company.mercadolibre_state = True
             return
         # recoger el estado y devolver True o False (meli)
         #False if logged ok
@@ -421,6 +425,14 @@ class res_company(models.Model):
     mercadolibre_cron_post_update_stock = fields.Boolean(
         string='Publicar Stock',
         help="Mantiene al dia la cantidad disponible en las publicaciones que ya existen. No modifica la ficha del producto ni crea publicaciones nuevas.")
+    mercadolibre_stock_diag_reactivate = fields.Selection(
+        [('all', 'Todas (comportamiento anterior)'),
+         ('out_of_stock', 'Sólo las pausadas por falta de stock'),
+         ('never', 'Nunca')],
+        string='Diagnóstico: reactivar pausadas', default='all',
+        help="Qué hace el diagnóstico de stock con una publicación PAUSADA en MercadoLibre que tiene stock en Odoo. "
+             "'Todas' la reactiva siempre (también una pausa hecha a mano). "
+             "'Sólo falta de stock' la reactiva sólo si ML la pausó por quedarse sin stock. 'Nunca' no la toca.")
     mercadolibre_cron_post_update_price = fields.Boolean(
         string='Publicar Precio',
         help="Mantiene al dia el precio en las publicaciones que ya existen, tomandolo de la lista de precios configurada. No modifica la ficha del producto ni crea publicaciones nuevas.")
@@ -1743,7 +1755,8 @@ class res_company(models.Model):
                     icommit+= 1
                     icount+= 1
                     try:
-                        resjson = obj.product_post_stock(meli=meli)
+                        with self.env.cr.savepoint():  # #601 P6: un ítem que falla no deshace a los demás
+                            resjson = obj.product_post_stock(meli=meli)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
 
                         if "error" in resjson:
@@ -1761,12 +1774,13 @@ class res_company(models.Model):
                                 MeliCommit( self )
 
                     except Exception as e:
+                        if getattr(e, 'pgcode', '') in ('40001', '40P01'):
+                            raise  # serialización/deadlock: que lo maneje el reintento del cron
                         _logger.info("meli_update_remote_stock > Exception founded!")
                         _logger.info(e, exc_info=True)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
                         errors_list.append(f"{obj.default_code} {obj.meli_id} >> {e}")
-                        if auto_commit:
-                            self.env.cr.rollback()
+                        # #601 P6: el savepoint del ítem ya deshizo SÓLO este ítem; los anteriores quedan registrados
 
             noti.resource = "meli_update_remote_stock #"+str(icount) +'/'+str(maxcommits)
             noti.stop_internal_notification(errors="\n".join(errors_list), logs="\n".join(logs_list))
@@ -1846,7 +1860,8 @@ class res_company(models.Model):
                     icommit+= 1
                     icount+= 1
                     try:
-                        resjson = obj.product_post_stock(meli=meli)
+                        with self.env.cr.savepoint():  # #601 P6: un ítem que falla no deshace a los demás
+                            resjson = obj.product_post_stock(meli=meli)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
 
                         if "error" in resjson:
@@ -1864,12 +1879,13 @@ class res_company(models.Model):
                                 MeliCommit( self )
 
                     except Exception as e:
+                        if getattr(e, 'pgcode', '') in ('40001', '40P01'):
+                            raise  # serialización/deadlock: que lo maneje el reintento del cron
                         _logger.info("meli_update_remote_stock_rt > Exception founded!")
                         _logger.info(e, exc_info=True)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
                         errors_list.append(f"{obj.default_code} {obj.meli_id} >> {e}")
-                        if auto_commit:
-                            self.env.cr.rollback()
+                        # #601 P6: el savepoint del ítem ya deshizo SÓLO este ítem; los anteriores quedan registrados
 
             noti.resource = "meli_update_remote_stock_rt #"+str(icount) +'/'+str(maxcommits)
             noti.stop_internal_notification(errors="\n".join(errors_list), logs="\n".join(logs_list))
@@ -1911,7 +1927,7 @@ class res_company(models.Model):
             _logger.debug("MELI_STOCK_DIAG: no se pudo persistir meli_last_status de %s: %s",
                           meli_id, _st_err)
 
-    def meli_stock_diagnostic(self, meli=False):
+    def meli_stock_diagnostic(self, meli=False, reactivate=None):
         """
         Diagnostic safety check: compare Odoo stock vs ML stock for all published products.
         Runs at the end of each stock cron cycle. Detects and corrects:
@@ -1926,6 +1942,8 @@ class res_company(models.Model):
         t_diag_start = _time.time()
 
         company = self if self and self._name == 'res.company' and self.id else self.env.user.company_id
+        # #601 P7: pausar/despausar es decisión comercial — el modo lo elige la cuenta (multiple lo pasa) o la compañía.
+        reactivate = reactivate or company.mercadolibre_stock_diag_reactivate or 'all'
         if not company.mercadolibre_cron_post_update_stock:
             return {}
 
@@ -2138,6 +2156,12 @@ class res_company(models.Model):
                         # Skip only pure ML-managed fulfillment (no user_product_id — ML controls stock)
                         if ml_logistic == 'fulfillment' and not ml_user_product_id:
                             checked_items_log.append(f"⏭ {item_log} → paused pero FULFILLMENT ML puro (skip)")
+                            continue
+                        _ml_sub = rjson.get('sub_status') or []
+                        if reactivate == 'never' or (reactivate == 'out_of_stock' and 'out_of_stock' not in _ml_sub):
+                            _logger.info("MELI_STOCK_DIAG: NO reactiva [%s] %s (paused, sub_status=%s, modo=%s)", sku, meli_id, _ml_sub, reactivate)
+                            actions_taken.append(f"⏭ NO REACTIVA [{sku}] {meli_id} — pausada (sub_status={_ml_sub}), modo={reactivate}")
+                            checked_items_log.append(f"⏭ {item_log} → paused, NO se reactiva (modo={reactivate}, sub_status={_ml_sub})")
                             continue
                         product = self.env['product.product'].browse(pid)
                         if not product.meli_update_stock_blocked and not product.product_tmpl_id.meli_update_stock_blocked:
@@ -2434,7 +2458,8 @@ class res_company(models.Model):
                         if (obj.meli_id and icount<=topcommits):
                             try:
                                 #_logger.info( "Update Price: #" + str(icount) +'/'+str(maxcommits)+ ' meli_id:'+str(obj.meli_id)  )
-                                resjson = obj.product_post_price(meli=meli)
+                                with self.env.cr.savepoint():  # #601 P6: un ítem que falla no deshace a los demás
+                                    resjson = obj.product_post_price(meli=meli)
                                 logs+= str(obj.default_code)+" "+str(obj.meli_id)+": "+str(obj.meli_price)+"\n"
                                 if "error" in resjson:
                                     errors+= str(obj.default_code)+" "+str(obj.meli_id)+" >> "+str(resjson)+"\n"
@@ -2449,13 +2474,14 @@ class res_company(models.Model):
                                         MeliCommit( self )
 
                             except Exception as e:
+                                if getattr(e, 'pgcode', '') in ('40001', '40P01'):
+                                    raise  # serialización/deadlock: que lo maneje el reintento del cron
                                 _logger.info("meli_update_remote_price > Exception founded!")
                                 _logger.info(e, exc_info=True)
                                 logs+= str(obj.default_code)+" "+str(obj.meli_id)+": "+str(obj.meli_price)+", "
                                 #errors+= str(obj.default_code)+" "+str(obj.meli_id)+" >> "+str(e.args[0])+str(", ")
                                 errors+= str(obj.default_code)+" "+str(obj.meli_id)+" >> "+str(e)+"\n"
-                                if auto_commit:
-                                    self.env.cr.rollback()
+                                # #601 P6: el savepoint del ítem ya deshizo SÓLO este ítem; los anteriores quedan registrados
                                 pass;
 
                     noti.resource = "meli_update_remote_price #"+str(icount) +'/'+str(maxcommits)
