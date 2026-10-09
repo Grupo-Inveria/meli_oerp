@@ -159,11 +159,16 @@ def _meli_parse_attributes_input(raw):
             return [], ("Cada atributo tiene que ser un bloque con 'id' y 'value_name'. "
                         "Encontré: %s" % (str(item)[:60],))
         att_id = item.get("id") or item.get("att_id")
-        if not att_id:
-            return [], "Hay un atributo sin 'id' en la lista."
         value = item.get("value_name", item.get("value"))
         if value is None:
             value = ""
+        if not att_id:
+            # Atributo PROPIO del vendedor (sin id de ML): {'name': 'Modelos', 'value_name': ...}.
+            # En User Products, ML lo usa como selector de la familia (ej. "Modelos" en Estribos).
+            if item.get("name"):
+                out.append({"name": str(item["name"]).strip(), "value_name": str(value).strip()})
+                continue
+            return [], "Hay un atributo sin 'id' (ni 'name') en la lista."
         out.append({"id": str(att_id).strip(), "value_name": str(value).strip()})
     return out, None
 
@@ -1247,6 +1252,25 @@ class product_template(models.Model):
 class product_product(models.Model):
 
     _inherit = "product.product"
+
+    def _meli_family_selector_attributes(self):
+        """[#542] Atributos PROPIOS del vendedor que arman el selector de familia en ML.
+
+        Para cada valor de variante cuyo atributo tiene marcado "Selector de familia en ML"
+        devuelve {"name": <atributo>, "value_name": <valor>}. Sólo cuando cada variante es una
+        publicación propia: publicando como variaciones de ML el valor ya viaja en
+        attribute_combinations.
+        """
+        self.ensure_one()
+        tmpl = self.product_tmpl_id
+        if ("meli_pub_as_variant" in tmpl._fields and tmpl.meli_pub_as_variant):
+            return []
+        out = []
+        for ptav in self.product_template_attribute_value_ids:
+            att = ptav.attribute_id
+            if "meli_family_selector" in att._fields and att.meli_family_selector and ptav.name:
+                out.append({"name": (att.name or "").strip(), "value_name": (ptav.name or "").strip()})
+        return out
 
     # --- ML -> Odoo import of the MELI "Plantilla" tab attributes -----------
     # Single source of truth for the ML item-attribute -> Odoo Char field map
@@ -4297,8 +4321,11 @@ class product_product(models.Model):
                     #if not barcode_updated and set_barcode and variant.barcode:
                     #updated_attributes.append( { "id": "GTIN", "value_name": variant.barcode } )
 
+                    # [#542] Publicando cada variante como publicación propia, un atributo de
+                    # variación de ML (COLOR) con UN solo valor también es un atributo del ítem.
                     if (at_line_id.attribute_id.meli_default_id_attribute.id and
-                        at_line_id.attribute_id.meli_default_id_attribute.variation_attribute==False):
+                        (at_line_id.attribute_id.meli_default_id_attribute.variation_attribute==False
+                         or not product_tmpl.meli_pub_as_variant)):
                         _att_id = at_line_id.attribute_id.meli_default_id_attribute.att_id
                         # PACKAGE_* are catalog attrs (not modifiable); remap to SELLER_PACKAGE_*
                         _PACKAGE_REMAP = {
@@ -4465,11 +4492,22 @@ class product_product(models.Model):
                 # No se publica en silencio ignorando lo que el usuario cargó.
                 return warningobj.info(title='MELI ATRIBUTOS', message=_input_error, message_html="")
             for _a in _input_atts:
-                if _a["id"] in attributes_ids:
+                _key = _a.get("id") or ("name:" + _a["name"])
+                if _key in attributes_ids:
                     continue
-                attributes_ids[_a["id"]] = _a["value_name"]
+                attributes_ids[_key] = _a["value_name"]
                 attributes.append(_a)
-                _logger.info("MELI atributos (JSON): %s = %s", _a["id"], _a["value_name"])
+                _logger.info("MELI atributos (JSON): %s = %s", _key, _a["value_name"])
+
+        # [#542] Selector de familia: atributos de variante marcados "Selector de familia en ML".
+        # Después del JSON: si el usuario cargó ese atributo a mano, gana lo suyo.
+        for _a in product._meli_family_selector_attributes():
+            _key = "name:" + _a["name"]
+            if _key in attributes_ids:
+                continue
+            attributes_ids[_key] = _a["value_name"]
+            attributes.append(_a)
+            _logger.info("MELI selector de familia: %s = %s", _a["name"], _a["value_name"])
 
         # [#539] Atributos que vienen del MAPEO campo de Odoo -> atributo de ML.
         # COMPLETA, no reemplaza: lo que ya resolvieron las líneas de atributo de Odoo manda, porque
