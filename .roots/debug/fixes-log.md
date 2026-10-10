@@ -4,6 +4,12 @@
 
 ---
 
+### 9 oct 2026 — feat(seguridad): meli_api_url único + rastro del host alternativo [#661 fase 3, 542] (v19.0.26.210)
+
+**Archivos:** models/meli_util.py (meli_normalize_api_url, meli_proxy_audit, _meli_audit_wrap_request, _meli_resolve_api_host, get_new_instance, _nosdk_para_escritura), models/company.py, models/meli_proxy_audit.py, views/meli_proxy_audit_view.xml, migrations/19.0.26.210.
+
+**Decisiones:** fila del rastro en cursor PROPIO, sin FKs y con lock_timeout (no puede esperar un lock del llamador); 'blocked' con throttle 1/h; path decodificado y sin query (el SDK manda la query percent-encoded dentro del path: visto en odoo19mint). Search view: en 19 el <group> va sin expand/string.
+
 ### 8 oct 2026 — Albaran sin Contacto al agregar una linea a un pedido ML confirmado [#643 Shoppy 502] (v19.0.26.197)
 
 **Sintoma.** Despachos ML con el campo Contacto vacio (18 de 18 desde 15-ago tenian una linea agregada a mano; ej. OUT/145611, venta ML 2000018696043976).
@@ -1327,3 +1333,8 @@ EXIT=0, sin `ParseError`; `sale.order.meli_unread_messages` presente en el regis
 (push automático). Merge a `19.0` / promoción al deploy: a confirmar con el usuario.
 
 ---
+
+## 19.0.26.213 — 9-oct-2026 — #661 (542) access_token de ML en URLs/campos
+- **Síntoma:** el token de ML quedaba en `mercadolibre.payments.mercadopago_url` (guardado), en `meli_permalink_api` (pantalla), en los links del wizard de etiquetas y en `full_links` (JSON con el token como CLAVE), y `domain_discovery` lo logueaba con `_logger.info(url)`.
+- **Fix:** controller `controllers/token_views.py` (`/meli/item_api/<id>`, `/meli/shipment_labels`, auth=user + internos, ids validados, check de lectura) que pone el token en `Authorization: Bearer`; hooks `meli.util._meli_view_instance` y `mercadolibre.shipment._meli_label_instance` (multiple los pisa por cuenta); agrupación por `sha256(token)[:12]`.
+- **Migración 19.0.26.213:** limpia mercadopago_url, pdf_link, meli_warning.message(_html) y vacía full_links. Probada en PG16 y en odoo19mint (rollback).
