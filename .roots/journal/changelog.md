@@ -4,6 +4,39 @@
 
 ---
 
+## 19.0.26.219 — 10-oct-2026 · build de flota (sin cambios funcionales en este módulo)
+- Acompaña a meli_oerp_accounting 26.219 (#361 Score): no se concilia una factura global desde la notificación de una venta. Build único 26.219 en 16/17/18/19.
+
+## 19.0.26.218 — 10-oct-2026 · ventas de MercadoLibre: cancelaciones, estado de envío, línea de envío e IVA (#638 #618 #620 #486)
+- **#638** El re-chequeo de estado de órdenes recorre de forma rotativa todas las ventas abiertas (no sólo las últimas): una venta cancelada en ML se cancela en Odoo y, si ya tenía la salida de stock hecha, se genera su devolución.
+- **#618** El mismo re-chequeo refresca el estado de los envíos no terminales (p. ej. `ready_to_ship` → `delivered`).
+- **#620** La línea de envío de la venta refleja lo que **paga el comprador** según ML: si el flete lo cubre el vendedor (envío gratis/subsidiado, `cost_details`), la línea queda en 0 y no se suma al total.
+- **#486** La importación de órdenes toma el precio de ML siempre como IVA incluido, sin depender del flag de publicación.
+- Sin migración de datos nueva. Build 26.218 en 16/17/18/19 (paralelo a 26.217; al integrarse ambos en la rama de la serie se renumera).
+## Versión 19.0.26.217 — La venta ya no se llena de mensajes «Línea adicional» [#462 Olpa]
+10 oct 2026
+
+**Cambios:**
+
+1. **El problema:** en algunas ventas Full el historial sumaba un mensaje *«Línea adicional con [MEL Distribution]»*
+   (o del envío Flex) en cada actualización desde Mercado Libre: cientos por venta. El conector ponía el envío en 0
+   (porque la venta superaba lo cobrado) y en la pasada siguiente lo volvía a poner, y cada vez borraba y recreaba la línea.
+2. **La solución:** el precio del envío sólo se repone si producto + envío no supera lo cobrado. La venta queda
+   estable igual a lo cobrado y no se recrea la línea.
+
+Además: `.gitignore` deja afuera el bytecode también dentro de `.roots/`. Build único de flota 26.217.
+
+---
+
+## 19.0.26.216 — 10-oct-2026 · build de flota (sin cambios funcionales en este módulo)
+- Acompaña a meli_oerp_accounting 26.216 (#462 Olpa): los «Grupos de pago» de las ventas de MercadoLibre se confirman también con módulos cuyo botón Confirmar es `action_post` (p. ej. `account_payment_group_pro`). Integra además 26.214 (#486) y 26.215 (#661/542). Build único de flota 26.216 en 16/17/18/19.
+
+---
+
+## 19.0.26.215 — 10-oct-2026 · seguridad (#661, caso 542): sin dependencias externas desde git
+- `requirements.txt` ya no instala el SDK de Mercado Libre desde `git+https://github.com/ctmil/python-sdk-2025.git` (no estaba fijado a una versión). El módulo habla con la API de ML con `requests` directo (`MeliApiNoSDK`), como ya hacía cuando el SDK no estaba instalado.
+- Se elimina la carpeta `melisdk/` (SDK viejo 1.0.0 vendorizado, sin uso: todos sus imports estaban comentados).
+- Si una instancia ya tiene el paquete `meli` instalado, sigue funcionando igual (se usa si está; ya no se exige). Sin migración de datos. Build único de flota 26.215 en 16/17/18/19.
 ## 19.0.26.213 — 9-oct-2026 · seguridad (#661, caso 542): el token de Mercado Libre ya no queda en links ni campos
 - **Link Api** de la publicación, botón **Abrir API** y links **Descargar PDF/ZPL** de etiquetas: ahora los sirve Odoo (`/meli/item_api`, `/meli/shipment_labels`, sólo usuarios internos); el token viaja en el encabezado del servidor y ya no aparece en pantalla, historial del navegador ni logs.
 - El link del pago de Mercado Pago se guarda sin token; la sugerencia de categoría y la subida de imágenes legacy mandan el token por encabezado.
@@ -24,6 +57,25 @@
 - Requiere `-u meli_oerp` (migración 26.172 incluida). Build único de flota 26.198 en 16/17/18/19.
 
 ---
+## 19.0.26.179 — 3-oct-2026 · El estado del envío se mantiene al día [#618]
+- Las ventas de MercadoLibre ya no quedan en "Listo para enviar" para siempre: el barrido periódico de estados
+  vuelve a consultar también el **envío** (enviado, entregado, no entregado) de las órdenes abiertas, por turnos.
+- Se puede desactivar con el parámetro del sistema `meli_oerp.resync_shipment_status = 0`.
+## 19.0.26.180 — 3-oct-2026 · La línea de envío lleva lo que pagó el comprador [#620]
+- La línea de envío de la venta toma el costo que MercadoLibre informa como pagado por el comprador. Ya no queda en
+  $0 en unas ventas y con monto en otras, y el importe a facturar incluye ese envío.
+- Si el envío es gratis para el comprador (lo cubre el vendedor), la línea queda en 0 y no se factura.
+- El ajuste "Usar Monto de envío de Pagos" de la cuenta se sigue respetando.
+
+## 19.0.26.185 — 5-oct-2026 · las ventas de ML entran siempre por lo cobrado, publiques con o sin IVA [#486]
+- **El problema:** el campo *Impuestos incluidos* de la configuración decidía dos cosas a la vez: cómo se
+  PUBLICA la lista de precios y cómo se IMPORTAN las ventas. Con *impuestos incluidos* (lista con IVA) y un
+  IVA de venta no incluido en el producto, cada venta importada sumaba el impuesto encima del precio ya
+  final de ML (total x1,16) y quedaba en presupuesto por diferencia de montos.
+- **Ahora** la importación toma siempre el precio de ML como final con impuestos y lo netea por los
+  impuestos de venta no incluidos del producto: el total de la venta en Odoo es lo cobrado en ML.
+- **Sin cambios** en la publicación de precios, ni para quien tiene *impuestos excluidos* o impuestos
+  con precio incluido.
 ## 19.0.26.159 — 29-sep-2026 · build de flota
 - Sin cambios de código en esta serie: el número se alinea con 18.0.26.159 (#504/#520, descuento de vendedor y
   envío decididos juntos — la opción de tope existe sólo en 18.0).

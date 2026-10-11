@@ -23,7 +23,6 @@ from odoo import fields, models, api
 import logging
 from .meli_oerp_config import *
 
-#from ..melisdk.meli import Meli
 
 import json
 import hashlib
@@ -82,6 +81,7 @@ def _meli_label_download(url, access_token, timeout=60):
     return resp.content
 # `import *` no trae los nombres con guion bajo: este guard se importa explicito [#493]
 from .versions import _meli_guard_delivery_write
+from .receiver_cost import receiver_buyer_cost
 
 #
 #     https://www.odoo.com/fr_FR/forum/aide-1/question/solved-call-report-and-save-result-to-attachment-133244
@@ -680,6 +680,31 @@ class mercadolibre_shipment(models.Model):
                 updated += 1
         return updated
 
+    def _meli_buyer_shipping_amount(self, order=None, config=None):
+        """#620 - Flete que paga el COMPRADOR segun MercadoLibre (>= 0). Sin red.
+
+        Es el monto de la linea de envio de la venta, y el mismo numero que usa
+        sale.order._meli_shipping_missing_in_paid para el importe a facturar.
+        - mercadolibre_use_payment_shipping_amount = True (default): el shipping_amount
+          de los pagos aprobados (MercadoPago) — lo efectivamente cobrado como envio.
+        - = False: shipping_option.cost del envio (costo para el comprador; list_cost es
+          el costo lleno).
+        - En ambos, si eso da 0: receiver.cost de /shipments/{id}/costs NETO de lo que
+          cubre el vendedor (receiver_buyer_cost: envio gratis subsidiado => 0, Olpa 462).
+        Nunca se deduce comparando contra paid_amount."""
+        self.ensure_one()
+        use_payment = True
+        if config and "mercadolibre_use_payment_shipping_amount" in config._fields:
+            use_payment = config.mercadolibre_use_payment_shipping_amount
+        amount = 0.0
+        if use_payment:
+            amount = (order and order.payments_shipment_amount) or 0.0
+        else:
+            amount = self.shipping_cost or 0.0
+        if not amount and self.shipping_receiver_cost:
+            amount = self.shipping_receiver_cost
+        return max(float(amount or 0.0), 0.0)
+
     def _update_sale_order_shipping_info( self, order, meli=None, config=None ):
 
         company = (config and 'company_id' in config._fields and config.company_id) or ("company_id" in self._fields and self.company_id) or self.env.user.company_id
@@ -926,16 +951,10 @@ class mercadolibre_shipment(models.Model):
                 order._ensure_payment_shipping_amounts(meli=meli, config=config)
                 order.invalidate_recordset(['payments_shipment_amount'])
 
-            del_price = order.payments_shipment_amount;
-
-            if not mercadolibre_use_payment_shipping_amount:
-                del_price = shipment.shipping_cost
-
-            # Fallback órdenes pack/ME2: si ni el pago (payment.shipping_amount) ni
-            # shipping_option.cost traen el flete (queda 0), usar el costo del envío a
-            # cargo del comprador (receiver.cost de /shipments/{id}/costs).
-            if not del_price and shipment.shipping_receiver_cost:
-                del_price = shipment.shipping_receiver_cost
+            # #620: el flete de la linea = lo que PAGA EL COMPRADOR segun ML (ver
+            # _meli_buyer_shipping_amount). Mismo origen que antes, ahora en un solo lugar
+            # para que meli_amount_to_invoice use exactamente el mismo numero.
+            del_price = shipment._meli_buyer_shipping_amount(order, config=config)
 
             delivery_price = ml_product_price_conversion( self, product_related_obj=product_shipping_id, price=del_price, config=config ),
             if type(delivery_price)==tuple and len(delivery_price):
@@ -1001,13 +1020,17 @@ class mercadolibre_shipment(models.Model):
             #_logger.info("ship_carrier_id:"+str(ship_carrier_id)+" sorder.carrier_id:"+str(sorder.carrier_id))
 
             if shipment_amount_cond_fix:
-                #_logger.info("shipment_cond: "+str(shipment_amount_cond)+" paid: "+str(received_amount)+" vs total: "+str(sorder.amount_total))
-                if ( ship_carrier_id and sorder.carrier_id):
-                    delivery_price = 0.0
-                    #_logger.info("set_delivery_line:"+str(delivery_price))
-                    if (not including_shipping_cost=="never"):
-                        set_delivery_line( sorder, delivery_price, "Defined by MELI" )
-                delivery_price = 0.0
+                # #620 (T3LC 535): esta valvula ponia la linea de envio en 0 cuando el total
+                # de la venta superaba lo cobrable (meli_amount_to_invoice). En las ordenes
+                # donde ML no incluye el envio en paid_amount eso borraba un flete que el
+                # comprador SI pago (medido 15-16 sep: 138 de 343 en $0). El flete ya NO se
+                # infiere comparando contra lo pagado: la linea lleva lo que el envio de ML
+                # dice que paga el comprador (0 si el vendedor lo subsidia). Si igual no
+                # cierra, la diferencia la marca el control de confirmacion/factura.
+                _logger.info(
+                    "MELI #620 %s: total %.2f > cobrable %.2f; la linea de envio queda en el "
+                    "flete del comprador %.2f (no se baja a 0).", sorder.name,
+                    sorder.amount_total or 0.0, received_amount or 0.0, delivery_price or 0.0)
 
             if shipment_amount_cond_fix2 and ship_carrier_id and sorder.carrier_id:
                 #_logger.info("set_delivery_line (fix2):"+str(delivery_price))
@@ -1034,7 +1057,21 @@ class mercadolibre_shipment(models.Model):
                 #UPDATE PRICE
                 delivery_line = get_delivery_line(sorder)
 
-                if delivery_line and abs(delivery_line.price_unit-delivery_price)>1.0:
+                # [#462 Olpa, 26.217] Esta regla y la de arriba (shipment_amount_cond_fix:
+                # "si la venta supera lo cobrado, envio en 0") se deshacian mutuamente cuando el
+                # producto SOLO ya iguala o supera lo cobrado (Full: el envio lo paga el
+                # vendedor). Cada ciclo una ponia el envio en 0 y la siguiente lo reponia, y cada
+                # vez el core borraba y recreaba la linea: en una venta confirmada eso postea
+                # "Linea adicional con ..." (SO 6545: 1 por ciclo, 320 mensajes). Se repone el
+                # precio solo si producto + envio no supera lo cobrado (mismo umbral que la regla
+                # de arriba), asi ninguna de las dos deja un estado que la otra deshaga.
+                _upd_ok = True
+                if delivery_line and received_amount and delivery_price > 0.0:
+                    _dl_total = sum(l.price_total for l in sorder.order_line if l.is_delivery)
+                    _would_total = (sorder.amount_total - _dl_total) + float(del_price or 0.0)
+                    _upd_ok = (_would_total - received_amount) <= 1.0
+
+                if delivery_line and _upd_ok and abs(delivery_line.price_unit-delivery_price)>1.0:
                     delivery_message = "Defined by MELI"
                     #_logger.info("Agregar delivery line delivery_price:"+str(delivery_price))
                     set_delivery_line(sorder, delivery_price, delivery_message )
@@ -1357,8 +1394,9 @@ class mercadolibre_shipment(models.Model):
                     # Costo del envío a cargo del COMPRADOR (receiver.cost). En órdenes
                     # pack/ME2 el flete no viene en payment.shipping_amount ni en
                     # shipping_option.cost — sí acá, en /costs → receiver.cost.
-                    _receiver = (isinstance(rcosts, dict) and rcosts.get('receiver')) or {}
-                    ship_json['receiver_cost'] = (isinstance(_receiver, dict) and _receiver.get('cost')) or 0.0
+                    # Descontando lo que cubre el vendedor (receiver.cost_details): con envío
+                    # gratis subsidiado, receiver.cost viene lleno y el comprador pagó 0.
+                    ship_json['receiver_cost'] = receiver_buyer_cost(rcosts)
 
                 seller_id = None
                 if config.mercadolibre_seller_user:
@@ -1990,6 +2028,63 @@ class mercadolibre_shipment(models.Model):
         else:
             sitem = self.env["mercadolibre.shipment.item"].create(ifields)
         return sitem
+
+    # #618 (T3LC) -- estados del ENVIO que ya no cambian: no se vuelven a consultar.
+    # not_delivered NO es terminal en general (returning_to_sender -> returned), salvo
+    # con los substatus de cierre.
+    _MELI_SHIP_TERMINAL = ("delivered", "cancelled")
+    _MELI_SHIP_NOT_DELIVERED_CLOSED = ("returned", "returned_to_warehouse", "returned_and_destroyed")
+
+    def _meli_ship_status_is_open(self):
+        """#618 - True si el estado del envio todavia puede cambiar en ML."""
+        self.ensure_one()
+        st = self.status or ""
+        if st in self._MELI_SHIP_TERMINAL:
+            return False
+        if st == "not_delivered" and (self.substatus or "") in self._MELI_SHIP_NOT_DELIVERED_CLOSED:
+            return False
+        return True
+
+    def _meli_resync_status_vals(self, meli):
+        """#618 - UN GET /shipments/<id> y devuelve los vals de ESTADO si cambio ({} si no).
+
+        No escribe nada: quien llama aplica los vals en un cursor corto aparte (ver
+        mercadolibre.orders._meli_apply_shipment_refresh). Es la parte de estado de
+        fetch_shipment (status, substatus, fechas de status_history, last_updated,
+        tracking) sin el resto (costos, items, direccion, venta), que no cambia con el
+        avance del envio y que ya refresca fetch_shipment cuando la ORDEN cambia."""
+        self.ensure_one()
+        if not self.shipping_id or not meli or meli.access_token == "PASIVA":
+            return {}
+        response = meli.get("/shipments/" + str(self.shipping_id), {'access_token': meli.access_token})
+        ship_json = response and response.json() or {}
+        if not isinstance(ship_json, dict) or "error" in ship_json or not ship_json.get("status"):
+            return {}
+        new_status = ship_json.get("status") or ""
+        new_substatus = ship_json.get("substatus") or ""
+        if new_status == (self.status or "") and new_substatus == (self.substatus or ""):
+            return {}
+        vals = {
+            "status": new_status,
+            "substatus": new_substatus,
+            "name": "MSO [" + str(self.shipping_id) + "] " + str(new_status) + "/" + str(new_substatus or None),
+        }
+        if ship_json.get("last_updated"):
+            vals["last_updated"] = ml_datetime(ship_json["last_updated"])
+        if ship_json.get("tracking_number") and not self.tracking_number:
+            vals["tracking_number"] = ship_json["tracking_number"]
+        sh = ship_json.get("status_history") or {}
+        if isinstance(sh, dict) and sh:
+            if "status_history_json" in self._fields:
+                try:
+                    vals["status_history_json"] = json.dumps(sh)
+                except Exception:
+                    pass
+            for key in ("date_handling", "date_ready_to_ship", "date_shipped", "date_delivered",
+                        "date_first_visit", "date_not_delivered", "date_returned", "date_cancelled"):
+                if sh.get(key) and key in self._fields:
+                    vals[key] = ml_datetime(sh[key])
+        return vals
 
     def update( self, context=None, meli=None, config=None ):
 

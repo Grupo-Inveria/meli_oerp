@@ -64,7 +64,6 @@ _MELI_REQUESTED_BY_ES = {
     'mediator': 'Mediador',
 }
 
-#from ..melisdk.meli import Meli
 
 import json
 
@@ -650,6 +649,32 @@ class sale_order(models.Model):
             return invoices[0]
         return None
 
+    def _meli_shipping_missing_in_paid(self, config=None):
+        """#620 (T3LC 535) - Flete del comprador que NO esta dentro de meli_paid_amount.
+
+        En ordenes ME2 donde el pago no trae shipping_amount, ML informa paid_amount SIN el
+        envio (medido: 138 + 51 de 343 ventas con envio a cargo del comprador), mientras
+        el camino de carrito ya le suma receiver.cost. La linea de envio lleva el flete
+        del comprador; esto hace que el importe a facturar lo lleve tambien.
+        - 0 si el pago aprobado trae shipping_amount (paid_amount ya lo incluye).
+        - 0 si paid_amount ya cubre el flete: paid - total + cupon >= flete (carrito, o
+          ML que si lo incluyo) — nunca se suma dos veces.
+        - 0 si el comprador no paga envio (subsidiado por el vendedor)."""
+        self.ensure_one()
+        shipment = "meli_shipment" in self._fields and self.meli_shipment
+        morder = self.meli_orders[:1]
+        if not shipment or not morder:
+            return 0.0
+        if morder.payments_shipment_amount:
+            return 0.0
+        buyer = shipment._meli_buyer_shipping_amount(morder, config=config)
+        if buyer <= 0.0:
+            return 0.0
+        in_paid = (self.meli_paid_amount or 0.0) - (self.meli_total_amount or 0.0) + abs(self.meli_coupon_amount or 0.0)
+        if in_paid >= buyer - 1.0:
+            return 0.0
+        return buyer
+
     def meli_amount_to_invoice( self, meli=None, config=None ):
 
         total_config = (config and "mercadolibre_order_total_config" in config._fields) and config.mercadolibre_order_total_config
@@ -705,7 +730,10 @@ class sale_order(models.Model):
             if (including_shipping_cost=="never"):
                 return (self.meli_paid_amount - seller_discount - self.meli_shipping_amount)
 
-            return (self.meli_paid_amount - seller_discount)
+            # #620: si ML no incluyo el envio que pago el comprador en paid_amount, se suma
+            # (la linea de envio lo lleva, ver mercadolibre.shipment._meli_buyer_shipping_amount).
+            return (self.meli_paid_amount - seller_discount
+                    + self._meli_shipping_missing_in_paid(config=config))
 
         if total_config in ['total_amount']:
             return self.meli_total_amount
@@ -5868,11 +5896,12 @@ class mercadolibre_orders(models.Model):
         que el cron de importacion (orders_query_iterate, sort=date_desc) no alcanza
         cuando la orden es mas vieja que la ventana de las ~50 mas nuevas por creacion.
 
-        Barrido ACOTADO (rate-limit safe): solo pedidos IN-FLIGHT (no entregados —
-        la cancelacion del comprador es pre-entrega) con sale.order NO cancelada, creados
-        en los ultimos N dias (mercadolibre_cron_orders_status_days), con tope
-        mercadolibre_cron_orders_status_limit, ordenados de MAS VIEJO a mas nuevo (las
-        at-risk que el sweep normal date_desc no cubre). Por pedido hace UN GET
+        Barrido ACOTADO (rate-limit safe) y ROTATIVO (#638): pedidos no cancelados con
+        sale.order NO cancelada, creados en los ultimos N dias
+        (mercadolibre_cron_orders_status_days), con tope
+        mercadolibre_cron_orders_status_limit, ordenados por meli_status_checked_at
+        (nunca revisados primero) y luego de MAS VIEJO a mas nuevo; cada ciclo sella
+        las que reviso, asi el siguiente toma las proximas. Por pedido hace UN GET
         /orders/<id> (ligero) y solo procesa (confirm_ml / meli_cancel_with_detail)
         cuando el estado CAMBIO.
 
@@ -5906,13 +5935,10 @@ class mercadolibre_orders(models.Model):
             ("sale_order", "!=", False),
             ("sale_order.state", "!=", "cancel"),
             ("status", "not in", ("cancelled", "invalid")),
-            # #475: la cancelacion por el comprador es SIEMPRE pre-entrega. Una vez
-            # entregada (delivered), la orden ya no es cancelable por esa via, asi que
-            # re-consultarla es gasto de API puro. Excluir delivered concentra el barrido
-            # en las ordenes IN-FLIGHT (empty/pending/ready_to_ship/not_delivered/shipped
-            # = todas las no-entregadas, no se pierde ninguna cancelable) y hace que la
-            # ventana entera sea cubrible en sellers de alto volumen (delivered ~73%).
-            ("shipment_status", "not in", ("delivered",)),
+            # #638: SIN filtro por shipment_status. El estado del envio en Odoo casi
+            # nunca se refresca (T3LC 1-oct: 25.273 de 25.659 seguian ready_to_ship), asi
+            # que el filtro no achicaba el pool; y ademas dejaba afuera las canceladas
+            # post-entrega. La cobertura la da la ROTACION (meli_status_checked_at).
         ]
         if "company_id" in self._fields:
             domain.append(("company_id", "in", (company.id, False)))
@@ -5920,25 +5946,56 @@ class mercadolibre_orders(models.Model):
         # para no re-consultar con el token de una cuenta ordenes de otra.
         if account is not None and "connection_account" in self._fields:
             domain.append(("connection_account", "=", account.id))
-        # #475: order ASC (mas VIEJAS primero) — son las at-risk que el sweep normal
-        # (orders_query_iterate, date_desc) NO cubre. Complementario: si el limit trunca,
-        # trunca las NUEVAS (ya cubiertas por el sweep normal), nunca las viejas.
-        candidates = self.search(domain, order="date_created asc", limit=query_limit)
+        # #638: barrido ROTATIVO. Antes era order="date_created asc": como las que no
+        # cambian siguen en el dominio, cada ciclo re-consultaba SIEMPRE las mismas
+        # `limit` del borde de la ventana y una cancelacion se veia recien a ~N dias.
+        # Ahora primero las nunca revisadas, despues las revisadas hace mas tiempo; a
+        # igualdad, las mas viejas. Cada ciclo avanza `limit` posiciones en la ventana.
+        candidates = self.search(domain, order="meli_status_checked_at asc nulls first, date_created asc", limit=query_limit)
 
         Autocommit(self, False)
         checked = changed = cancelled = 0
+        # #638: ids revisados SIN cambios (o que ML no devuelve) -> se sellan al final
+        # en una transaccion corta aparte (ver _meli_mark_status_checked).
+        unchanged_ids = []
+        # #618: envios NO terminales de las ordenes sin cambios -> GET /shipments y, si el
+        # estado cambio, se aplica al final en un cursor corto aparte (como el sello).
+        ship_enabled = self._meli_resync_shipment_enabled()
+        ship_updates = {}
+        ship_checked = 0
+        ship_seen = set()  # carrito: varias ordenes comparten envio -> 1 GET por envio
         for order in candidates:
             try:
                 response = meli.get("/orders/"+str(order.order_id), {'access_token': meli.access_token})
                 order_json = response.json()
                 checked += 1
                 if "id" not in order_json:
+                    unchanged_ids.append(order.id)
                     continue
                 new_status = order_json.get("status") or ''
                 if str(order.status) == str(new_status):
                     # sin cambios -> sin side effects (idempotente, barato: 1 GET)
+                    unchanged_ids.append(order.id)
+                    # #618: el estado del ENVIO avanza aunque la orden siga `paid`
+                    # (ready_to_ship -> shipped -> delivered). Si la orden CAMBIA, el
+                    # resync completo (orders_update_order -> fetch_shipment) ya lo trae.
+                    if (ship_enabled and order.shipment and order.shipment.id not in ship_seen
+                            and order.shipment._meli_ship_status_is_open()):
+                        ship_seen.add(order.shipment.id)
+                        try:
+                            ship_checked += 1
+                            svals = order.shipment._meli_resync_status_vals(meli)
+                            if svals:
+                                ship_updates[order.shipment.id] = svals
+                        except Exception as e:
+                            # nunca rompe el barrido de ordenes: se reintenta en la proxima vuelta
+                            _logger.warning("orders_resync_status #618 > no se pudo consultar el envio %s de la orden %s: %s",
+                                            order.shipment.shipping_id, order.order_id, e)
                     continue
                 changed += 1
+                # las que cambian se sellan en la transaccion del cron: si se revierte,
+                # vuelven al frente de la cola y se reintentan.
+                order.meli_status_checked_at = fields.Datetime.now()
                 cancel_detail = order_json.get("cancel_detail") or {}
                 cancel_detail_text = ""
                 if cancel_detail:
@@ -5994,8 +6051,83 @@ class mercadolibre_orders(models.Model):
                 except Exception as e:
                     _logger.error("orders_resync_status > error re-decidiendo la cancelacion de %s: %s", sorder.name, e, exc_info=True)
                     MeliRollback(self)
-        _logger.info("orders_resync_status: cuenta=%s checked=%s changed=%s cancelled=%s waiting_return=%s (days=%s limit=%s)", (account and account.name) or "-", checked, changed, cancelled, waiting, days, query_limit)
-        return {"checked": checked, "changed": changed, "cancelled": cancelled, "waiting_return": waiting}
+        ship_applied = self._meli_apply_shipment_refresh(ship_updates)
+        if ship_enabled:
+            _logger.info("orders_resync_status #618: cuenta=%s envios consultados=%s cambiados=%s aplicados=%s",
+                         (account and account.name) or "-", ship_checked, len(ship_updates), ship_applied)
+        marked = self._meli_mark_status_checked(unchanged_ids)
+        _logger.info("orders_resync_status: cuenta=%s checked=%s changed=%s cancelled=%s waiting_return=%s marked=%s (days=%s limit=%s)", (account and account.name) or "-", checked, changed, cancelled, waiting, marked, days, query_limit)
+        return {"checked": checked, "changed": changed, "cancelled": cancelled, "waiting_return": waiting, "marked": marked}
+
+    def _meli_mark_status_checked(self, order_ids):
+        """#638 - Sella meli_status_checked_at=now en las ordenes revisadas SIN cambios.
+
+        Va en un cursor PROPIO y corto, no en la transaccion del cron:
+        - MeliCommit es flush (no COMMIT): la transaccion del cron dura todo el barrido
+          (red incluida). Sellar 500 filas ahi las dejaria lockeadas hasta el final y,
+          bajo REPEATABLE READ, cualquier update concurrente del import sobre una de ellas
+          haria fallar el cron entero. Aca el lock dura un UPDATE.
+        - FOR UPDATE SKIP LOCKED: nunca espera. Si la transaccion del cron (o el import)
+          tiene la fila tomada, se saltea; queda al frente y se revisa el proximo ciclo.
+        - Si falla, solo se pierde la rotacion de este ciclo (se loguea), nunca el cron."""
+        if not order_ids:
+            return 0
+        try:
+            self.env.flush_all()
+            with self.env.registry.cursor() as mark_cr:
+                mark_cr.execute(
+                    """UPDATE mercadolibre_orders SET meli_status_checked_at = %s
+                        WHERE id IN (SELECT id FROM mercadolibre_orders
+                                      WHERE id = ANY(%s) FOR UPDATE SKIP LOCKED)""",
+                    (fields.Datetime.now(), list(order_ids)),
+                )
+                return mark_cr.rowcount
+        except Exception as e:
+            _logger.warning("orders_resync_status > no se pudo sellar meli_status_checked_at (%s ordenes): %s", len(order_ids), e)
+            return 0
+
+    _MELI_RESYNC_SHIPMENT_PARAM = "meli_oerp.resync_shipment_status"
+
+    def _meli_resync_shipment_enabled(self):
+        """#618 - el refresco del estado del envio en orders_resync_status esta prendido
+        por defecto; se apaga sin -u con ir.config_parameter
+        meli_oerp.resync_shipment_status = 0 (p.ej. si el rate-limit de ML aprieta: suma
+        hasta 1 GET /shipments por orden revisada, solo para envios NO terminales)."""
+        raw = self.env["ir.config_parameter"].sudo().get_param(self._MELI_RESYNC_SHIPMENT_PARAM, "1")
+        return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+
+    def _meli_apply_shipment_refresh(self, updates):
+        """#618 - Escribe el estado nuevo de los envios ({shipment_id: vals}).
+
+        Mismo criterio que _meli_mark_status_checked: cursor PROPIO y corto, no la
+        transaccion del cron (MeliCommit es flush: la del cron dura todo el barrido con
+        la red adentro). FOR UPDATE SKIP LOCKED + lock_timeout: nunca espera a la
+        transaccion del cron ni al import; lo que esta tomado se saltea y se vuelve a
+        consultar en la proxima vuelta de la rotacion. Si falla, solo se pierde el
+        refresco de este ciclo (se loguea), nunca el cron."""
+        if not updates:
+            return 0
+        applied = 0
+        try:
+            self.env.flush_all()
+            with self.env.registry.cursor() as ship_cr:
+                ship_cr.execute("SET LOCAL lock_timeout = '5s'")
+                ship_cr.execute(
+                    """SELECT id FROM mercadolibre_shipment
+                        WHERE id = ANY(%s) FOR UPDATE SKIP LOCKED""",
+                    (list(updates),),
+                )
+                free_ids = [row[0] for row in ship_cr.fetchall()]
+                ship_env = api.Environment(ship_cr, self.env.uid, dict(self.env.context, tracking_disable=True))
+                Shipment = ship_env["mercadolibre.shipment"]
+                for sid in free_ids:
+                    Shipment.browse(sid).write(updates[sid])
+                    applied += 1
+                ship_env.flush_all()
+        except Exception as e:
+            _logger.warning("orders_resync_status #618 > no se pudo aplicar el estado de %s envios: %s", len(updates), e)
+            return 0
+        return applied
 
     def _meli_cancel_api(self, config=None):
         """Cliente de la API de ML para leer la foto de una cancelacion (solo GET).
@@ -6141,6 +6273,10 @@ class mercadolibre_orders(models.Model):
     status_detail = fields.Text(string='Status detail, in case the order was cancelled.')
     date_created = fields.Datetime('Creation date')
     date_closed = fields.Datetime('Closing date')
+    # #638 (T3LC) -- ultima vez que orders_resync_status consulto el estado de esta
+    # orden en ML. El barrido rota por este campo (asc nulls first) para recorrer
+    # la ventana entera en vez de re-consultar siempre las mismas mas viejas.
+    meli_status_checked_at = fields.Datetime(string='Estado ML revisado', index=True, copy=False, readonly=True)
 
 
     def search_order_order_product(self, operator, value):

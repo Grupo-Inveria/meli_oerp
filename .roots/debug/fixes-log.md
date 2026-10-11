@@ -4,6 +4,26 @@
 
 ---
 
+## 10 oct 2026 — #462 Olpa: chatter con cientos de «Línea adicional con …» (v19.0.26.217)
+
+**Síntoma:** SO 6545/6546/6547 (Full) ~320 mensajes c/u y SO 6554 (Flex) 363: una «Línea adicional con [MEL Distribution]» por ciclo de actualización, y «Condition not met: paid vs total» cada dos ciclos.
+
+**Causa:** `models/shipment.py::_update_sale_order_shipping_info` tiene dos reglas que se deshacían mutuamente cuando el producto solo ya iguala o supera lo cobrado (envío Full a cargo del vendedor): `shipment_amount_cond_fix` (total > cobrado ⇒ envío 0) y «UPDATE PRICE» (línea ≠ precio de envío ⇒ lo repone). Cada cambio pasa por `set_delivery_line` ⇒ core `_remove_delivery_line` + `_create_delivery_line`, y en una venta confirmada `sale.order.line.create` postea «Extra line with %s».
+
+**Fix:** «UPDATE PRICE» sólo repone si `(amount_total - envío actual) + del_price - cobrado <= 1.0` (mismo umbral que la regla A).
+
+**Prueba:** Odoo 18 local, A/B con el método real (registros locales, sin red), números de SO 6545: origin ⇒ 32.135,51↔30.982 y 1 mensaje por pasada; 26.217 ⇒ estable desde la 2.ª pasada, 0 mensajes después. 6554 (Flex): mismo patrón en el chatter, no medido su amount_to_invoice.
+
+---
+
+### 9 oct 2026 — Build de flota 26.214 (v19.0.26.214)
+
+Sin cambios de codigo en meli_oerp. El build 26.214 es el fix de meli_oerp_autofacturacion (#486 Enerpoint: el portal
+de autofactura daba 500 al ingresar el RFC — timbrado con account.move.send abstracto + savepoint roto por el commit de
+l10n_mx_edi). Sube por la regla del build unico de flota.
+
+---
+
 ### 9 oct 2026 — feat(seguridad): meli_api_url único + rastro del host alternativo [#661 fase 3, 542] (v19.0.26.210)
 
 **Archivos:** models/meli_util.py (meli_normalize_api_url, meli_proxy_audit, _meli_audit_wrap_request, _meli_resolve_api_host, get_new_instance, _nosdk_para_escritura), models/company.py, models/meli_proxy_audit.py, views/meli_proxy_audit_view.xml, migrations/19.0.26.210.
@@ -19,6 +39,54 @@
 **Fix.** `sale_order.write` (orders.py) + `_meli_sync_shipping_partner_to_stock`: si cambia `partner_shipping_id` en una venta ML, se sincroniza grupo, albaranes abiertos y moves abiertos sin albaran que aun llevaban el valor viejo (no pisa contactos manuales ni albaranes hechos/cancelados). Savepoint, nunca rompe la sync.
 
 **No cubre** los albaranes que YA estan desfasados (841): se sanean con un script de datos (picking.partner_id = venta.partner_shipping_id en OUT abiertos desfasados), un caso verificado antes del lote.
+### 3 oct 2026 — #618 T3LC: el estado del ENVIO se vuelve a consultar en el barrido rotativo (v19.0.26.179)
+
+Sobre #638 (26.176, `orders_resync_status` rotativo). Medido en T3LC (1-oct): de 25.659 ordenes abiertas en 15 d,
+25.273 seguian `ready_to_ship` y 16 `delivered` — `mercadolibre.shipment.status` solo se escribia en
+`fetch_shipment`, que corre al importar o cuando la ORDEN cambia; una orden `paid` que avanza en el envio no cambia.
+- `orders_resync_status`: para cada orden revisada SIN cambio de estado cuyo envio no es terminal
+  (`delivered`/`cancelled`, o `not_delivered` con substatus de devolucion cerrada) hace 1 GET `/shipments/<id>`
+  (1 por envio y por ciclo, aunque el carrito tenga varias ordenes). Misma rotacion por `meli_status_checked_at`.
+- `mercadolibre.shipment._meli_resync_status_vals`: solo la parte de ESTADO de fetch_shipment (status, substatus,
+  name, last_updated, tracking si faltaba, fechas de status_history). No toca costos, items, direccion ni la venta.
+- `_meli_apply_shipment_refresh`: escribe en un cursor corto aparte, `FOR UPDATE SKIP LOCKED` + `lock_timeout 5s`
+  (nunca espera a la txn del cron ni al import; lo tomado se reintenta en la proxima vuelta).
+- Apagable sin -u: `ir.config_parameter` `meli_oerp.resync_shipment_status = 0`. Log: `orders_resync_status #618:
+  ... envios consultados= cambiados= aplicados=`.
+- Efecto aguas abajo: `meli_status_brief` de la venta y el cron #328 de meli_oerp_stock (`meli_shipment.status =
+  delivered`) pasan a ver los envios entregados.
+### 3 oct 2026 — #620 T3LC: la linea de envio lleva lo que paga el COMPRADOR, no se infiere contra paid_amount (v19.0.26.180)
+
+Medido en T3LC (config: total=paid_amount, incluir envio=always, use_payment_shipping_amount=True, cupon=full),
+ventas 15-16 sep con envio a cargo del comprador (343): 138 con la linea de envio en $0, 154 cobradas, 51 cobradas
+pero con `meli_paid_amount` sin el envio (conflicto al facturar). Causa: `_update_sale_order_shipping_info` ponia la
+linea en 0 cuando `amount_total - meli_amount_to_invoice > 1` (`shipment_amount_cond_fix`); en ordenes ME2 cuyo pago
+no trae `shipping_amount`, ML informa `paid_amount` SIN el envio (solo el camino de carrito le sumaba receiver.cost).
+- Incluye el fix Olpa 462 (cherry-pick de `claude/fix-envio-receiver-subsidiado-19.0`): `receiver_cost` = receiver.cost
+  menos lo que cubre el vendedor (`cost_details`) => envio gratis subsidiado = 0 para el comprador.
+- `mercadolibre.shipment._meli_buyer_shipping_amount(order, config)`: UNICO origen del flete del comprador.
+  `mercadolibre_use_payment_shipping_amount` (meli_oerp_multiple, default True) se respeta igual que antes:
+  True = shipping_amount de los pagos aprobados; False = shipping_option.cost; en ambos, si da 0, receiver cost neto.
+- `_update_sale_order_shipping_info`: la valvula ya NO baja la linea a 0 (solo loguea `MELI #620`).
+- `sale.order._meli_shipping_missing_in_paid` + `meli_amount_to_invoice` (modos paid_amount/transaction_amount,
+  incluir envio != never): suma el flete del comprador si no esta en paid_amount (0 si el pago trae shipping_amount,
+  o si `paid - total + cupon >= flete` — carrito ya ajustado —, o si el comprador no paga envio). Nunca suma dos veces.
+- No repara ventas existentes bloqueadas/facturadas (el guard #493 sigue). Las abiertas se corrigen en el proximo resync.
+
+### 5 oct 2026 — Las ordenes ML se importan siempre como precio final IVA incluido [#486 Enerpoint] (v19.0.26.185)
+
+**Sintoma.** Enerpoint (MX): desde el 23-sep 22:2xZ cada orden ML importada (o re-procesada en borrador) quedaba con
+total Odoo = total ML x 1,16 y el control de montos de `confirm_ml` la dejaba en presupuesto (no-FULL sin confirmar).
+**Causa.** `ml_product_price_conversion()` (versions.py) sólo neteaba el impuesto si `ml_tax_excluded(config)`, es decir
+si `mercadolibre_tax_included='tax_excluded'`. Ese campo es el de la PUBLICACION (lista con o sin IVA): el cliente lo pasó
+a `tax_included` (su lista 43 ya trae IVA, para publicarla tal cual) y con eso la importación dejó de netear; su IVA 16 %
+no es `price_include` ⇒ se sumaba encima. Un campo, dos responsabilidades.
+**Fix.** La conversión ya no consulta el flag: el importe de ML se netea siempre por los impuestos de venta NO incluidos
+del producto (company de la conf). Con impuestos `price_include` no cambia nada; con `tax_excluded` tampoco (era la misma
+rama). Sólo cambia `tax_included`/`auto` + impuesto no incluido, que era justo el caso roto (total != cobrado).
+La publicación (`ml_tax_excluded` en product.py / connection_binding.py) queda igual.
+**Prueba.** Datos reales de 326292 (`ML 2000015321357013`, ML 800, tax 65 16 %): price_unit 689,655, total 800,00.
+Pre-corte 322799 (ML 1000) y 323269 (ML 554,40) dan lo mismo que antes. Sin migración (no toca datos).
 
 ### 30 sep 2026 — Build de flota 26.166 (v19.0.26.166)
 
