@@ -4,6 +4,26 @@
 
 ---
 
+## 13 oct 2026 — #638 T3LC: la cancelación automática devolvía stock con CUALQUIER motivo (v19.0.26.221)
+**Síntoma:** el barrido rotativo de estados (#638, 26.218) cancelaba y **devolvía** (IN validado) las ventas canceladas
+en ML de los últimos 15 días sin mirar el motivo: `pack_splitted` (los ítems salen en las órdenes nuevas del split),
+`shipment_not_delivered` (paquete posiblemente perdido) y `mediations` (reclamo abierto) subían un stock que no estaba
+en el depósito. En T3LC salieron así, p. ej., MLWH/IN/00628 e IN/00644 (`pack_splitted`).
+**Causa:** `meli_cancel_with_detail` (legacy, paso 1) y `_meli_cancel_por_estado_ml` (paso 3) llamaban
+`_meli_return_done_pickings` incondicionalmente; el motivo (`meli_cancel_reason_code`, OLA 3) sólo se guardaba.
+**Fix:** paso de MERCADERÍA único `_meli_cancel_goods_return` con filtro por motivo. Función pura
+`cancel_decision.cancel_return_allowed(code, raw)`; parámetro `meli_oerp.cancel_return_reasons` (default
+`buyer_cancel_express,fraud`, `*` = todos, motivo vacío ⇒ no devuelve). Fuera de lista y con salida hecha sin devolver:
+NO devolución, la venta se cancela igual (facturas: misma política), `sale.order.meli_cancel_return_skipped=True`,
+chatter `once_key=cancel-return-skip-<id>`, log WARNING `MELI_CANCEL_RETURN_SKIP`. `return_mode='none'` no marca.
+Escape (reparación/decisión humana): context `meli_cancel_return_any_reason=True` ⇒ devuelve y apaga la marca.
+**Por qué en el paso compartido y no sólo en el barrido:** import y `confirm_ml` llaman al mismo método; con el filtro
+sólo en el barrido, la misma venta devolvería o no según qué cron la viera primero.
+**Prueba:** Postgres real, Odoo 16/17/18/19 (tests/shell_cancel_return_reasons.py): 17/17 por serie —
+legacy por motivo, sin motivo, reproceso, escape, `*`, lista custom, `return_mode none`, `orders_resync_status` con
+`meli` simulado (sin red), `por_estado_ml`. Test puro: tests/test_cancel_decision_pure.py (TestCancelReturnReasons).
+**No cubre:** ventas canceladas ANTES de 26.221 sin devolución (no se marcan retroactivamente).
+
 ## 10 oct 2026 — #462 Olpa: chatter con cientos de «Línea adicional con …» (v19.0.26.217)
 
 **Síntoma:** SO 6545/6546/6547 (Full) ~320 mensajes c/u y SO 6554 (Flex) 363: una «Línea adicional con [MEL Distribution]» por ciclo de actualización, y «Condition not met: paid vs total» cada dos ciclos.
@@ -55,6 +75,23 @@ Sobre #638 (26.176, `orders_resync_status` rotativo). Medido en T3LC (1-oct): de
   ... envios consultados= cambiados= aplicados=`.
 - Efecto aguas abajo: `meli_status_brief` de la venta y el cron #328 de meli_oerp_stock (`meli_shipment.status =
   delivered`) pasan a ver los envios entregados.
+### 7 oct 2026 — #158 Elvimarta: vaiven de la linea de envio ENVIO-ME1 — mismo flete en la linea y en lo cobrable (v19.0.26.194)
+
+Apilado sobre #620 (26.180). Medido en 158 (IHSA, config total=paid_amount): la linea ENVIO-ME1 oscilaba
+(ML 2000015003762179: 72 cambios de total 12-15 sep) y la factura automatica del cliente salia en un minuto
+con el envio en 0 (5 casos 2..7-oct). Mecanismo en origin/16-19 (26.166): `shipment_amount_cond_fix` comparaba
+`amount_total` (que INCLUYE la linea actual) contra `meli_amount_to_invoice` (= paid_amount, SIN envio en ME1)
+=> con linea = flete bajaba a 0; con linea = 0 el "UPDATE PRICE" reponia el flete. Cada pasada invertia.
+- #620 ya saca la valvula (solo loguea). Pero `_meli_shipping_missing_in_paid` devolvia 0 si el pago trae
+  `shipping_amount` — justo el caso 158: total == paid == 3.138.200 y el pago trae 205.570 de envio.
+  Sin esto, lo cobrable quedaba sin el flete que la linea si lleva ("Condition not met" en confirmacion/factura).
+- Criterio unico y puro: `receiver_cost.shipping_missing_in_paid` (test en tests/test_receiver_cost_pure.py).
+  Con pago CON envio suma el flete solo si `|paid - total + cupon| <= 1` y la venta tiene UNA orden ML
+  (pack: no se mezcla el flete de una orden con paid/total del pack). Nunca suma dos veces. Sin red.
+- shipment.py sin cambios. No repara ventas ya facturadas (guard #493/#508 sigue).
+- Riesgo residual sin caso medido: el tope de descuento del vendedor en meli_amount_to_invoice compara contra
+  amount_total con la linea incluida.
+
 ### 3 oct 2026 — #620 T3LC: la linea de envio lleva lo que paga el COMPRADOR, no se infiere contra paid_amount (v19.0.26.180)
 
 Medido en T3LC (config: total=paid_amount, incluir envio=always, use_payment_shipping_amount=True, cupon=full),
@@ -87,6 +124,80 @@ rama). Sólo cambia `tax_included`/`auto` + impuesto no incluido, que era justo 
 La publicación (`ml_tax_excluded` en product.py / connection_binding.py) queda igual.
 **Prueba.** Datos reales de 326292 (`ML 2000015321357013`, ML 800, tax 65 16 %): price_unit 689,655, total 800,00.
 Pre-corte 322799 (ML 1000) y 323269 (ML 554,40) dan lo mismo que antes. Sin migración (no toca datos).
+### 1 oct 2026 — Casos especiales de confirmación y cancelación ML: E1-E4 [Tus Refacciones 431] (v19.0.26.171)
+
+**Pedido.** FCA (1-oct, tras el pase de 431 a 26.170): "hacé los fixes necesarios para los casos especiales agregando las
+opciones necesarias". Casos vistos en PROD/demo el 30-sep. Plan: `.roots/tasks/PLAN-2026-09-28-431-test-y-revision-mapeo-cancelaciones-18.md` (workspace).
+- **E1 — "Confirmar siempre" (`waiting`) con ruta MTO PURA.** El hook de `stock.move.create`/`_prepare_procurement_qty`
+  (contexto `meli_force_mts_product_ids`) sólo forzaba make_to_stock en reglas `mts_else_mto`; con `make_to_order` puro (la ruta
+  MTO estándar de Odoo) la venta volvía a cotización. Ahora `_MELI_FORCEABLE_PROCURE = ('mts_else_mto', 'make_to_order')`.
+  Y si no hay productos sin existencia/sin proveedor (MTO puro CON existencia y sin proveedor: compra igual y falla),
+  `_meli_storable_products_without_seller` da los que se fuerzan (aviso: "la salida se abastece de la existencia del almacén").
+  Sin opción nueva. Límite: en almacenes de varios pasos (pick+ship) la salida forzada espera existencia en Salida.
+- **E2 — "Cancelaciones automáticas desde"** (`mercadolibre_cancel_auto_from`, Datetime, `res.company` + GEMELO en
+  `mercadolibre.configuration`, default vacío = como antes). `meli_cancel_with_detail` llama primero a
+  `_meli_cancel_hold_by_cutoff` (antes de los dos modos y de cualquier red): si ML canceló antes de la fecha ⇒ NO devolución,
+  NO factura, NO cancelación; `meli_cancel_held=True` + aviso once (`cancel-held-<so>-<corte>`). Fecha comparada:
+  `meli_cancel_date` nuevo (= `cancel_detail.date`, se escribe donde ya se escribía `meli_cancel_reason_code` y desde el
+  `order_json` fresco) → la "fecha:" que `meli_status_detail` trae en el texto → fecha de la venta en ML
+  (`meli_date_closed`/`meli_date_created`) → `date_order` (que `action_confirm` reescribe: último recurso). Respaldo conservador:
+  la cancelación nunca es anterior a la venta. Filtro nuevo "MercadoLibre Cancelaciones retenidas (anteriores al corte)" (las
+  retenidas también salen en "Canceladas pendientes en Odoo"). Acción de servidor "MercadoLibre: procesar cancelación ignorando
+  la fecha de corte" (`action_meli_cancel_process_held`, contexto `meli_cancel_ignore_cutoff`).
+- **E3 — excepciones por motivo en el modo `legacy`.** La ola 26.164 ya las cubría SÓLO en `por_estado_ml` (FULL ⇒ no mueve stock;
+  pago acreditado sin reintegro, típico `pack_splitted` ⇒ sin devolución ni NC, retiene). En `legacy` (default) no: FULL validaba
+  la devolución (en 18/19 el guard "sin cantidades" mira la cantidad ENTREGADA, > 0) y `pack_splitted` devolvía + NC. Corrección
+  por default (sin opción): FULL ⇒ `_meli_return_done_pickings` no crea devolución (aviso once `ret-full-<so>`), en los dos modos;
+  `pack_splitted` (código o texto) en legacy ⇒ `_meli_cancel_pack_splitted_legacy`: sin devolución ni NC; cancela sólo si no hay
+  salida hecha ni factura publicada, si no queda abierta con aviso "ACCIÓN REQUERIDA … buscar la venta gemela" (once).
+- **E4 — "Monto correcto, listo para confirmar venta."** se posteaba en cada reintento del cron (prod 431: 4 veces en 25 min).
+  Ahora once (`confirm-ready-<so>`) y no se repite si la venta ya tiene el texto viejo sin marca.
+**Test (Odoo 18 local, bases t18_431ce = 26.171 / t18_431ce_ctl = 26.170, mismo script).** E1 MTO puro waiting sin stock/sin prov
+⇒ sale + OUT confirmed + 0 compras + 1 aviso (ctl: cotización) · con stock/sin prov ⇒ OUT assigned (ctl: cotización) · con prov,
+confirm default y mts_else_mto = ctl. E4 4 pasadas ⇒ 1 aviso (ctl 4). E2 corte 30-sep 22:06Z: cancelada 10-sep (texto, order_json
+o venta) ⇒ retenida, 0 devoluciones, 1 aviso en 2 pasadas; por_estado_ml retenida sin red; cancelada 1-oct y sin corte = ctl;
+acción manual ⇒ cancela + devolución; cuenta vacía + compañía con corte ⇒ retenida. E3 FULL ⇒ 0 devoluciones (ctl 1);
+pack_splitted salida hecha ⇒ abierta, 0 devoluciones (ctl devolución + cancela); con factura ⇒ 0 NC (ctl 1); sin salida y
+buyer_cancel_express = ctl.
+**Port.** Mismo delta que 18.0 (md5 idéntico del diff de models/ y views/). py_compile + XML OK. NO corrido en Odoo 19.0: 18.0 sí (ver fixes-log 18.0). Odoo 17 local no instala desde cero ni en el control 26.170 (wizard_sales.xml de meli_oerp_multiple: campo 'name' inexistente en mercadolibre.orders.import, preexistente).
+
+### 30 sep 2026 — Venta ML sin existencia: opción por cuenta "Venta sin existencia al confirmar" [#645 Tus Refacciones 431] (v19.0.26.170)
+
+**Pedido.** Mario (431), tras la call del 30-sep: la venta ML sin existencia NO debe quedar en cotización (lo que hacía
+26.163/#585 cuando la compra fallaba): quiere lo estándar — venta confirmada y salida "En espera" aunque la compra no se pueda
+generar (sin precio de proveedor, regla `mts_else_mto` de SC_NL).
+**Qué.** Selection `mercadolibre_order_confirm_no_stock_mode` en `res.company` y GEMELO en `mercadolibre.configuration`
+(meli_oerp_multiple), mismo default `confirm` (bug #453). Leída con `_meli_cancel_setting` (la cuenta manda).
+- `confirm` (default): camino 26.165 sin cambios (control origin 26.166 = mismos conteos).
+- `waiting`: si `action_confirm` falla, `_meli_confirm_waiting_retry` reintenta en savepoint con contexto
+  `meli_force_mts_product_ids` (productos sin proveedor, o sin stock si no hay sin proveedor): `stock_move.py` hace que los moves
+  de reglas `mts_else_mto` de esos productos queden make_to_stock (16/17: `create` corrige el `make_to_order` de `_run_pull`;
+  18/19: `_prepare_procurement_qty` devuelve 0 y `procurement.group` lo saltea). Venta `sale` + OUT confirmado/en espera + aviso
+  once (`confirm-waiting-<so>-<hash>`). Si el reintento deja moves draft sin albarán o falla ⇒ vuelve al camino #585 (cotización).
+  Los productos con proveedor siguen comprando (venta mixta: compra sólo del que tiene proveedor).
+- `quotation`: `_meli_confirm_block_no_stock` antes de `action_confirm`: faltantes de `free_qty` en el almacén de la venta
+  (UdM del producto, líneas agregadas por producto) ⇒ no confirma, `{'error': ...}`, aviso once (`confirm-nostock-<so>-<hash>`)
+  con producto, pedido, disponible y faltante. La próxima pasada confirma sola si ya hay existencia.
+**Decisiones.** No se consideran: servicios, consumibles no almacenables (`is_storable`/`type=='product'` según `_fields`),
+triangulación (referencia `DSTR_` o ruta con regla destino cliente `buy`/origen proveedor = dropship). Kits (BoM phantom): se
+miran los COMPONENTES (`_bom_find` + `explode`); si no se puede explotar, el kit se mide como producto.
+**Test (Odoo 18 local, base t18_645).** confirm A/B/D = control origin · waiting W1 sin stock/sin prov ⇒ sale + OUT confirmed + 1
+aviso + 0 compras (3 pasadas = 1 aviso) · W2 con prov ⇒ sale + OUT + 1 compra · W3 con stock ⇒ OUT assigned · quotation Q1 ⇒ draft
++ 1 aviso (2 pasadas), llega stock ⇒ sale · dropship/DSTR_ ⇒ sale · UoM docena ⇒ faltan 2 · kit ⇒ faltante del componente.
+16/17/19: mismo código (py_compile), no corridos en Odoo.
+### 5 oct 2026 — FIX fecha límite de despacho vacía: `/shipments/{id}/sla` (v19.0.26.188) [#431 Tus Refacciones]
+**Archivos:** `models/shipment.py` (`fetch_shipment`), `models/orders.py`, `views/orders_view.xml`, `migrations/19.0.26.188/pre-migrate.py`
+
+- **Bug (medido en prod 431, 5-oct):** `estimated_handling_limit` vacío en 0/725 envíos de 3 días ⇒ `sale.order.meli_handling_limit`
+  ("Límite despacho ML") y su badge de estado no mostraban nada. ML dejó de mandar `estimated_handling_limit` en `/shipments/{id}`
+  (ni `lead_time` ni `shipping_option`, tampoco con `x-format-new` ni en `/lead_time`).
+- **Fix:** en `fetch_shipment`, si la fecha no vino y el envío está por despachar (`pending`/`handling`/`ready_to_ship`),
+  `GET /shipments/{id}/sla` (timeout 5 s) → `expected_date` (→ UTC naive con `ml_datetime`). 404/sin fecha ⇒ log info;
+  excepción/timeout ⇒ warning; en ambos casos el campo queda como estaba y el fetch sigue.
+- `sale.order.meli_handling_limit` pasa a **almacenado + índice** y se agrega como columna **opcional oculta** en la lista de
+  pedidos/presupuestos (17+: `sale.sale_order_tree`; 16: `sale.view_order_tree` y `sale.view_quotation_tree`).
+- **Probado** (Odoo 18 local): JSON real del envío 48177776750 ⇒ `2026-10-07 00:00:00` UTC (= 6-oct 18:00 -06:00, lo que ve el vendedor en ML).
+
 
 ### 30 sep 2026 — Build de flota 26.166 (v19.0.26.166)
 
@@ -1406,3 +1517,6 @@ EXIT=0, sin `ParseError`; `sale.order.meli_unread_messages` presente en el regis
 - **Síntoma:** el token de ML quedaba en `mercadolibre.payments.mercadopago_url` (guardado), en `meli_permalink_api` (pantalla), en los links del wizard de etiquetas y en `full_links` (JSON con el token como CLAVE), y `domain_discovery` lo logueaba con `_logger.info(url)`.
 - **Fix:** controller `controllers/token_views.py` (`/meli/item_api/<id>`, `/meli/shipment_labels`, auth=user + internos, ids validados, check de lectura) que pone el token en `Authorization: Bearer`; hooks `meli.util._meli_view_instance` y `mercadolibre.shipment._meli_label_instance` (multiple los pisa por cuenta); agrupación por `sha256(token)[:12]`.
 - **Migración 19.0.26.213:** limpia mercadopago_url, pdf_link, meli_warning.message(_html) y vacía full_links. Probada en PG16 y en odoo19mint (rollback).
+
+## 19.0.26.222 — 13-oct-2026 · migración SLA renombrada (26.188 → 26.222)
+- La migración de #431 (llenar `meli_handling_limit` almacenado por SQL) vivía en `migrations/19.0.26.188/`: ninguna base por encima de 26.188 la habría corrido y Odoo recalcularía el related registro por registro. Se movió a `19.0.26.222/`; es idempotente (`ADD COLUMN IF NOT EXISTS` + `UPDATE`). Probado: instalado 26.221 → `-u` 26.222 en 16/17/18/19, la migración corre (banco Postgres, 13-oct).

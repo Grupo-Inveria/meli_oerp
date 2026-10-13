@@ -739,6 +739,47 @@ class res_company(models.Model):
             "acreditado sin reintegro (p. ej. pack dividido) se deja para revisar a mano. Si ML "
             "no responde, no se toca nada y se reintenta. Cada decisión queda en el chatter.")
 
+    # Venta ML sin existencia al confirmar (#645, Tus Refacciones 431, 30-sep-2026).
+    # GEMELO en meli_oerp_multiple/models/connection_configuration.py con el MISMO
+    # default (bug del #453): con cuenta de conexion manda el de la CUENTA.
+    mercadolibre_order_confirm_no_stock_mode = fields.Selection([
+        ("confirm", "Confirmar; si el abastecimiento falla, queda en cotización"),
+        ("waiting", "Confirmar siempre: la salida queda en espera de existencia"),
+        ("quotation", "No confirmar sin existencia: queda en cotización hasta que haya"),
+    ], string="Venta sin existencia al confirmar",
+       default="confirm",
+       help="Qué hacer al confirmar una venta de MercadoLibre cuando algún producto no tiene "
+            "existencia libre en el almacén de la venta:\n"
+            "- Confirmar; si el abastecimiento falla, queda en cotización (por defecto): se "
+            "confirma como siempre. Si Odoo no puede abastecerla (p. ej. la ruta intenta COMPRAR "
+            "y el producto no tiene un precio de proveedor válido), la venta queda como "
+            "cotización con un aviso que nombra el producto.\n"
+            "- Confirmar siempre, la salida queda en espera: la venta se confirma y el albarán de "
+            "salida se crea en 'En espera' aunque no haya existencia. Si el producto tiene "
+            "proveedor, se genera la compra como siempre; si no se puede generar la compra (sin "
+            "precio de proveedor), la salida igual se crea en espera y se avisa UNA vez en la "
+            "venta qué productos no se pudieron comprar.\n"
+            "- No confirmar sin existencia: la venta queda en cotización con un aviso de los "
+            "productos y las cantidades que faltan, y se confirma sola en la próxima "
+            "sincronización cuando haya existencia en el almacén de la venta.\n"
+            "Los servicios, los consumibles sin control de inventario y los productos de "
+            "triangulación (dropship o referencia DSTR_) no se consideran.")
+
+    # 26.171 (E2, Tus Refacciones 431): fecha de corte de las cancelaciones automáticas.
+    # GEMELO en meli_oerp_multiple/models/connection_configuration.py con el MISMO default
+    # (vacío; bug del #453): con cuenta de conexion manda el de la CUENTA.
+    mercadolibre_cancel_auto_from = fields.Datetime(
+       string="Cancelaciones automáticas desde",
+       help="Fecha y hora desde la que las cancelaciones de MercadoLibre se procesan "
+            "automáticamente (devolución, factura y cancelación de la venta, según 'Devolución "
+            "de mercadería al cancelar pedido' y 'Decisión al cancelar pedido').\n"
+            "Un pedido que ML canceló ANTES de esta fecha no se toca: queda retenido, marcado "
+            "'ML Cancelación retenida' y visible en los filtros 'MercadoLibre Cancelaciones "
+            "retenidas' y 'MercadoLibre Canceladas pendientes en Odoo', para tratarlo a mano. "
+            "Se compara con la fecha de cancelación que informa ML; si no se tiene, con la fecha "
+            "de la venta.\n"
+            "Vacío (por defecto): se procesan todas, como hasta ahora.")
+
     # [#493 Shoppy] Ver la nota gemela en meli_oerp_multiple/models/connection_configuration.py:
     # este campo se declara en los DOS modelos y el default DEBE ser el mismo en ambos.
     mercadolibre_protect_invoiced_orders = fields.Boolean(
@@ -1992,6 +2033,27 @@ class res_company(models.Model):
             _logger.debug("MELI_STOCK_DIAG: no se pudo persistir meli_last_status de %s: %s",
                           meli_id, _st_err)
 
+    def _meli_stock_safety_qty(self):
+        """[529] Stock de seguridad vigente para esta compania: el MAYOR entre el de la compania
+        (meli_oerp_stock, monocuenta) y el de las configuraciones de sus cuentas ML
+        (meli_oerp_multiple). El diagnostico de stock compara contra el stock de Odoo y tiene que
+        descontar lo MISMO que descuenta el envio (_meli_available_quantity); si no, reactiva o
+        "corrige" publicaciones que el resguardo dejo en 0 a proposito. Se usa el maximo para que el
+        diagnostico nunca reactive algo que alguna cuenta resguarda. 0 = sin resguardo (como antes)."""
+        company = self
+        qtys = [0]
+        if "mercadolibre_stock_safety_qty" in company._fields:
+            qtys.append(company.mercadolibre_stock_safety_qty or 0)
+        try:
+            if "mercadolibre.account" in self.env and "configuration" in self.env["mercadolibre.account"]._fields:
+                accounts = self.env["mercadolibre.account"].sudo().search([("company_id", "=", company.id)])
+                for cfg in accounts.mapped("configuration"):
+                    if "mercadolibre_stock_safety_qty" in cfg._fields:
+                        qtys.append(cfg.mercadolibre_stock_safety_qty or 0)
+        except Exception as _e:
+            _logger.debug("MELI_STOCK_DIAG: no se pudo leer el stock de seguridad de las cuentas: %s", _e)
+        return max(max(qtys), 0)
+
     def meli_stock_diagnostic(self, meli=False, reactivate=None):
         """
         Diagnostic safety check: compare Odoo stock vs ML stock for all published products.
@@ -2050,6 +2112,8 @@ class res_company(models.Model):
             AND (pp.meli_shipping_logistic_type IS NULL OR pp.meli_shipping_logistic_type != 'fulfillment')
         """, (company.id,))
         rows = self.env.cr.fetchall()
+        # [529] el stock de Odoo se compara YA descontado el stock de seguridad (mismo calculo que el envio)
+        _safety = company._meli_stock_safety_qty()
 
         reactivate_candidates = []        # (id, sku, meli_id, odoo_qty, meli_qty)
         drift_candidates = []             # (id, sku, meli_id, odoo_qty, meli_qty)
@@ -2065,7 +2129,7 @@ class res_company(models.Model):
 
         for row in rows:
             pid, sku, meli_id, meli_qty, odoo_qty, logistic_type = row
-            odoo_qty = max(odoo_qty or 0.0, 0.0)
+            odoo_qty = max((odoo_qty or 0.0) - _safety, 0.0)
             meli_qty = meli_qty or 0
 
             # fulfillment_user_product_id items: stored meli_qty reflects meli_facility
@@ -2100,16 +2164,16 @@ class res_company(models.Model):
                         GROUP BY sq.product_id
                     ) sq ON sq.product_id = pp.id
                     WHERE mp.meli_last_status = 'paused'
-                      AND COALESCE(sq.avail_qty, 0) > 0
+                      AND COALESCE(sq.avail_qty, 0) > %s
                       AND (pt.company_id IS NULL OR pt.company_id = %s)
                       AND mp.conn_id IS NOT NULL
                       AND mp.conn_id LIKE 'M%%'
                       AND (pp.meli_shipping_logistic_type IS NULL OR pp.meli_shipping_logistic_type != 'fulfillment')
                     ORDER BY qty_on_hand DESC
                     LIMIT 100
-                """, (company.id,))
+                """, (_safety, company.id,))
                 for pid2, sku2, meli_id2, meli_qty2, odoo_qty2 in self.env.cr.fetchall():
-                    odoo_qty2 = max(odoo_qty2 or 0.0, 0.0)
+                    odoo_qty2 = max((odoo_qty2 or 0.0) - _safety, 0.0)
                     # Skip if already in reactivate_candidates or fulfillment_user_candidates
                     already = (
                         any(r[2] == meli_id2 for r in reactivate_candidates)

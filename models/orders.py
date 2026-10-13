@@ -27,6 +27,7 @@ import logging
 import re
 from .meli_oerp_config import *
 from . import cancel_decision as _meli_cd
+from .receiver_cost import shipping_missing_in_paid as _meli_shipping_missing_in_paid_pure
 from time import monotonic as _mono
 
 # Traducción de códigos de cancelación ML → español
@@ -420,6 +421,29 @@ class sale_order(models.Model):
         string='ML Decisión de cancelación', copy=False, readonly=True,
         help="Última decisión tomada con el estado actualizado de MercadoLibre (orden, pagos "
              "y envío): la foto usada y la fila aplicada.")
+    # 26.221 (T3LC #638): la cancelacion de ML NO devolvio el stock porque el motivo esta
+    # fuera de `meli_oerp.cancel_return_reasons` (default buyer_cancel_express,fraud). La
+    # venta se cancelo igual; la salida sigue hecha. Es la lista de trabajo para decidir a
+    # mano (filtro "ML: cancelada sin devolución de stock"). Se apaga sola si despues se
+    # devuelve (ver _meli_cancel_goods_return).
+    meli_cancel_return_skipped = fields.Boolean(
+        string='ML Cancelada sin devolución de stock', index=True, copy=False, readonly=True,
+        help="MercadoLibre canceló el pedido con un motivo que NO está en el parámetro del "
+             "sistema 'meli_oerp.cancel_return_reasons' (por defecto: buyer_cancel_express, "
+             "fraud), así que NO se creó la devolución de la mercadería ya entregada. "
+             "Revisar si la mercadería volvió y, si corresponde, devolverla a mano.")
+    # 26.171 (E2, 431): fecha de la cancelación en ML (`cancel_detail.date`) y la marca de
+    # "cancelación retenida": ML la canceló ANTES de la fecha de corte configurada
+    # ("Cancelaciones automáticas desde") y por eso NO se accionó automáticamente.
+    meli_cancel_date = fields.Datetime(
+        string='ML Fecha de cancelación', copy=False, index=True,
+        help="Fecha en que MercadoLibre canceló el pedido (cancel_detail.date).")
+    meli_cancel_held = fields.Boolean(
+        string='ML Cancelación retenida (anterior al corte)', copy=False, index=True,
+        help="MercadoLibre canceló este pedido antes de la fecha configurada en 'Cancelaciones "
+             "automáticas desde': no se canceló la venta, ni se creó la devolución, ni se tocó la "
+             "factura. Se trata a mano (o con la acción 'MercadoLibre: procesar cancelación "
+             "ignorando la fecha de corte').")
     meli_date_created = fields.Datetime('Meli Creation date')
     meli_date_closed = fields.Datetime('Meli Closing date')
 
@@ -456,6 +480,7 @@ class sale_order(models.Model):
 
     meli_handling_limit = fields.Datetime(
         related='meli_shipment.estimated_handling_limit',
+        store=True, index=True,
         readonly=True, string="Límite despacho ML")
 
     meli_handling_limit_status = fields.Selection([
@@ -650,30 +675,28 @@ class sale_order(models.Model):
         return None
 
     def _meli_shipping_missing_in_paid(self, config=None):
-        """#620 (T3LC 535) - Flete del comprador que NO esta dentro de meli_paid_amount.
+        """#620 (T3LC 535) + #158 (Elvimarta) - Flete del comprador que NO esta dentro de
+        meli_paid_amount, con el MISMO numero que lleva la linea de envio.
 
-        En ordenes ME2 donde el pago no trae shipping_amount, ML informa paid_amount SIN el
-        envio (medido: 138 + 51 de 343 ventas con envio a cargo del comprador), mientras
-        el camino de carrito ya le suma receiver.cost. La linea de envio lleva el flete
-        del comprador; esto hace que el importe a facturar lo lleve tambien.
-        - 0 si el pago aprobado trae shipping_amount (paid_amount ya lo incluye).
-        - 0 si paid_amount ya cubre el flete: paid - total + cupon >= flete (carrito, o
-          ML que si lo incluyo) — nunca se suma dos veces.
-        - 0 si el comprador no paga envio (subsidiado por el vendedor)."""
+        #620: en ordenes ME2 donde el pago no trae shipping_amount, ML informa paid_amount
+        SIN el envio. #158: en ordenes ME1 el pago SI trae shipping_amount y paid_amount
+        TAMPOCO lo incluye (paid == total de items). En los dos casos la linea lleva el flete
+        y el importe a facturar tiene que llevarlo; si no, la linea y lo cobrable no cierran
+        y cada camino resuelve distinto (vaiven de la linea / "Condition not met").
+        El criterio vive en receiver_cost.shipping_missing_in_paid (puro, con test)."""
         self.ensure_one()
         shipment = "meli_shipment" in self._fields and self.meli_shipment
         morder = self.meli_orders[:1]
         if not shipment or not morder:
             return 0.0
-        if morder.payments_shipment_amount:
-            return 0.0
-        buyer = shipment._meli_buyer_shipping_amount(morder, config=config)
-        if buyer <= 0.0:
-            return 0.0
-        in_paid = (self.meli_paid_amount or 0.0) - (self.meli_total_amount or 0.0) + abs(self.meli_coupon_amount or 0.0)
-        if in_paid >= buyer - 1.0:
-            return 0.0
-        return buyer
+        return _meli_shipping_missing_in_paid_pure(
+            buyer=shipment._meli_buyer_shipping_amount(morder, config=config),
+            paid=self.meli_paid_amount,
+            total=self.meli_total_amount,
+            coupon=self.meli_coupon_amount,
+            payment_shipping=morder.payments_shipment_amount,
+            n_orders=len(self.meli_orders),
+        )
 
     def meli_amount_to_invoice( self, meli=None, config=None ):
 
@@ -770,6 +793,13 @@ class sale_order(models.Model):
 
     def _meli_action_confirm_safe(self, config=None):
         self.ensure_one()
+        # #645 (431): modo "Venta sin existencia al confirmar". 'confirm' (default) = el
+        # camino de siempre (26.165), sin ninguna lectura extra de stock.
+        no_stock_mode = self._meli_no_stock_mode(config=config)
+        if no_stock_mode == 'quotation':
+            blocked = self._meli_confirm_block_no_stock(config=config)
+            if blocked:
+                return blocked
         try:
             with self.env.cr.savepoint():
                 self.action_confirm()
@@ -778,6 +808,10 @@ class sale_order(models.Model):
                 # Transitorio (lock/serialización): sin aviso al usuario, el cron reintenta.
                 _logger.warning("MELI confirm (savepoint) concurrency error on SO id=%s: %s", self.id, e)
                 return {'error': str(e)}
+            if no_stock_mode == 'waiting':
+                waiting_res = self._meli_confirm_waiting_retry(e, config=config)
+                if waiting_res is not None:
+                    return waiting_res
             detail = self._meli_exception_text(e)
             reason = self._meli_confirm_failure_message(detail)
             _logger.warning("MELI confirm (savepoint) FAILED on SO %s (id=%s), queda cotizacion: %s",
@@ -863,6 +897,220 @@ class sale_order(models.Model):
             msg = "%s." % prefix
         msg += "%s Detalle: %s" % (suffix or "", detail or '-')
         return msg
+
+    # ------------------------------------------------------------------
+    # #645 (Tus Refacciones 431, 30-sep-2026): venta ML sin existencia.
+    # `mercadolibre_order_confirm_no_stock_mode` (cuenta + gemelo en compañía,
+    # mismo default 'confirm'):
+    #   confirm   -> camino 26.165 (#585): si el abastecimiento falla, cotización + aviso.
+    #   waiting   -> confirma SIEMPRE con albarán: si falla la COMPRA (mts_else_mto sin
+    #                proveedor), reintenta en savepoint con los moves de salida de esos
+    #                productos en make_to_stock (contexto `meli_force_mts_product_ids`,
+    #                ver stock_move.py) => salida "En espera" + aviso UNA vez.
+    #   quotation -> sin existencia libre no llama a action_confirm: queda cotización
+    #                + aviso UNA vez con producto y faltante; la próxima pasada confirma.
+    # Sólo ORM local, nada de red. Lo que no es almacenable (servicios, consumibles),
+    # la triangulación (ruta dropship o referencia DSTR_) no se considera; los kits se
+    # miran por sus componentes.
+    # ------------------------------------------------------------------
+    _MELI_NO_STOCK_MODES = ('confirm', 'waiting', 'quotation')
+
+    def _meli_no_stock_mode(self, config=None):
+        try:
+            mode = self._meli_cancel_setting('mercadolibre_order_confirm_no_stock_mode', 'confirm',
+                                             config=self._meli_cancel_config(config))
+        except Exception as e:
+            _logger.warning("MELI confirm: no se pudo leer mercadolibre_order_confirm_no_stock_mode (SO id=%s): %s",
+                            self.id, e)
+            mode = 'confirm'
+        return mode if mode in self._MELI_NO_STOCK_MODES else 'confirm'
+
+    def _meli_is_dropship_line(self, line, product):
+        """Triangulación: referencia DSTR_ (convención de 431) o una ruta de la línea /
+        producto / categoría con una regla que entrega directo al cliente desde el
+        proveedor (la ruta Dropship estándar: action 'buy' con destino cliente)."""
+        if (product.default_code or '').upper().startswith('DSTR_'):
+            return True
+        routes = product.route_ids
+        if 'route_id' in line._fields and line.route_id:
+            routes = routes | line.route_id
+        if product.categ_id and 'total_route_ids' in product.categ_id._fields:
+            routes = routes | product.categ_id.total_route_ids
+        for rule in routes.rule_ids:
+            if rule.location_dest_id.usage == 'customer' and (
+                    rule.action == 'buy' or rule.location_src_id.usage == 'supplier'):
+                return True
+        return False
+
+    def _meli_kit_components(self, product, qty):
+        """Si `product` es un kit (mrp, BoM tipo phantom) devuelve [(componente, cantidad en
+        su UdM)] para `qty` (UdM del producto). None si no es kit o no se pudo explotar."""
+        if 'is_kits' not in product._fields or not product.is_kits or 'mrp.bom' not in self.env:
+            return None
+        try:
+            boms = self.env['mrp.bom']._bom_find(product, company_id=self.company_id.id, bom_type='phantom')
+            bom = boms.get(product) if isinstance(boms, dict) else boms[:1]
+            if not bom:
+                return None
+            factor = product.uom_id._compute_quantity(qty, bom.product_uom_id) / (bom.product_qty or 1.0)
+            _boms, lines = bom.explode(product, factor)
+            return [(bl.product_id, bl.product_uom_id._compute_quantity(data['qty'], bl.product_id.uom_id))
+                    for bl, data in lines]
+        except Exception as e:
+            _logger.warning("MELI confirm: no se pudo explotar el kit %s (SO id=%s): %s", product.display_name, self.id, e)
+            return None
+
+    def _meli_confirm_stock_shortages(self):
+        """Lee (sin escribir) los faltantes de existencia LIBRE en el almacén de la venta.
+        Devuelve [(product, necesario, libre, faltante)] en la UdM del producto, agregando
+        las líneas del mismo producto."""
+        needed = {}
+        order = []
+        for line in self.order_line:
+            product = line.product_id
+            if not product or getattr(line, 'display_type', False) or getattr(line, 'is_delivery', False):
+                continue
+            if self._meli_is_dropship_line(line, product):
+                continue
+            line_uom = ('product_uom_id' in line._fields and line.product_uom_id) or \
+                       ('product_uom' in line._fields and line.product_uom) or product.uom_id
+            try:
+                qty = line_uom._compute_quantity(line.product_uom_qty, product.uom_id)
+            except Exception:
+                qty = line.product_uom_qty
+            items = self._meli_kit_components(product, qty)
+            if items is None:
+                items = [(product, qty)]
+            for comp, comp_qty in items:
+                if not comp or not self._meli_product_is_storable(comp):
+                    continue
+                if comp.id not in needed:
+                    needed[comp.id] = [comp, 0.0]
+                    order.append(comp.id)
+                needed[comp.id][1] += comp_qty
+        ctx = {}
+        wh = self.warehouse_id
+        if wh:
+            ctx = {'warehouse': wh.id, 'warehouse_id': wh.id}
+        from odoo.tools import float_compare as _meli_float_compare
+        shortages = []
+        for pid in order:
+            comp, qty = needed[pid]
+            free = comp.with_context(**ctx).free_qty
+            rounding = comp.uom_id.rounding or 0.01
+            if _meli_float_compare(free, qty, precision_rounding=rounding) >= 0:
+                continue
+            missing = qty - max(free, 0.0)
+            shortages.append((comp, qty, free, missing))
+        return shortages
+
+    @staticmethod
+    def _meli_fmt_qty(qty):
+        return ("%.4f" % qty).rstrip('0').rstrip('.')
+
+    def _meli_confirm_block_no_stock(self, config=None):
+        """Modo 'quotation': si falta existencia, NO confirma. Devuelve {'error': ...} o {}."""
+        try:
+            shortages = self._meli_confirm_stock_shortages()
+        except Exception as e:
+            # Si no se puede medir, no se bloquea: se sigue con la confirmación de siempre.
+            _logger.warning("MELI confirm: no se pudo medir la existencia de SO id=%s: %s", self.id, e)
+            return {}
+        if not shortages:
+            return {}
+        parts = ["%s (pedido %s %s, disponible %s, faltan %s)" % (
+            p.display_name, self._meli_fmt_qty(need), p.uom_id.name,
+            self._meli_fmt_qty(max(free, 0.0)), self._meli_fmt_qty(missing))
+            for p, need, free, missing in shortages]
+        msg = ("Venta no confirmada: sin existencia suficiente en el almacén %s para %s. "
+               "Queda como cotización y se confirma sola en la próxima sincronización cuando haya "
+               "existencia (opción de la cuenta 'Venta sin existencia al confirmar').") % (
+            self.warehouse_id.display_name or '-', "; ".join(parts))
+        key_src = "|".join("%s:%s" % (p.id, self._meli_fmt_qty(missing)) for p, _n, _f, missing in shortages)
+        _logger.info("MELI confirm: SO %s (id=%s) sin existencia, queda cotizacion: %s", self.name, self.id, key_src)
+        try:
+            meli_message_post(self, msg, config=config,
+                              once_key="confirm-nostock-%s-%s" % (self.id, self._meli_short_hash(key_src)))
+        except Exception as post_err:
+            _logger.error("MELI confirm: no se pudo postear el aviso sin existencia en SO id=%s: %s", self.id, post_err)
+        return {'error': msg}
+
+    def _meli_storable_products_without_seller(self):
+        """Almacenables de la venta (sin triangulación) que no tienen un proveedor
+        seleccionable para la cantidad pedida. Sólo lectura."""
+        out = []
+        for line in self.order_line:
+            product = line.product_id
+            if not product or getattr(line, 'display_type', False) or getattr(line, 'is_delivery', False):
+                continue
+            if not self._meli_product_is_storable(product) or self._meli_is_dropship_line(line, product):
+                continue
+            if 'seller_ids' not in product._fields or product in out:
+                continue
+            try:
+                seller = product.with_company(self.company_id)._select_seller(
+                    quantity=line.product_uom_qty, uom_id=product.uom_id,
+                    date=fields.Date.context_today(self))
+            except Exception:
+                seller = product.seller_ids[:1]
+            if not seller:
+                out.append(product)
+        return out
+
+    def _meli_confirm_waiting_retry(self, first_error, config=None):
+        """Modo 'waiting': la confirmación normal falló. Reintenta con los productos sin
+        existencia en make_to_stock (no dispara la compra imposible) => la salida queda
+        'En espera'. Devuelve {} si confirmó, None si tampoco pudo (sigue el camino #585)."""
+        try:
+            sin_stock, sin_proveedor = self._meli_confirm_problem_products()
+        except Exception as e:
+            _logger.warning("MELI confirm waiting: no se pudieron leer los productos de SO id=%s: %s", self.id, e)
+            return None
+        forced = sin_proveedor or sin_stock
+        sin_compra = False
+        if not forced:
+            # 26.171 (E1): ruta MTO PURA ("make_to_order"): compra SIEMPRE, aunque haya
+            # existencia. Si el producto tiene existencia pero no proveedor, la compra
+            # falla igual: se fuerzan los almacenables sin proveedor (se abastecen de la
+            # existencia del almacén en vez de comprar).
+            try:
+                forced = self._meli_storable_products_without_seller()
+            except Exception as e:
+                _logger.warning("MELI confirm waiting: no se pudieron leer los proveedores de SO id=%s: %s", self.id, e)
+                forced = []
+            sin_compra = bool(forced)
+        if not forced:
+            return None
+        forced_ids = tuple(sorted(set(p.id for p in forced)))
+        try:
+            with self.env.cr.savepoint():
+                self.with_context(meli_force_mts_product_ids=forced_ids).action_confirm()
+                # Nunca venta confirmada SIN albarán.
+                if self._meli_draft_moves_without_picking():
+                    raise UserError("quedaron movimientos sin albarán")
+        except Exception as e2:
+            _logger.warning("MELI confirm waiting: reintento en make_to_stock FALLÓ en SO %s (id=%s): %s",
+                            self.name, self.id, self._meli_exception_text(e2))
+            return None
+        names = ", ".join(p.display_name for p in forced)
+        if sin_compra:
+            msg = ("Venta confirmada sin generar la compra de %s (no tiene un precio de proveedor válido): "
+                   "la salida se abastece de la existencia del almacén.") % names
+        elif sin_proveedor:
+            msg = ("Venta confirmada sin generar la compra de %s (no tiene un precio de proveedor válido): "
+                   "la salida queda en espera de existencia.") % names
+        else:
+            msg = ("Venta confirmada: no se pudo abastecer %s, la salida queda en espera de existencia. "
+                   "Detalle: %s") % (names, self._meli_exception_text(first_error) or '-')
+        _logger.info("MELI confirm waiting: SO %s (id=%s) confirmada con salida en espera (%s)",
+                     self.name, self.id, names)
+        try:
+            meli_message_post(self, msg, config=config,
+                              once_key="confirm-waiting-%s-%s" % (self.id, self._meli_short_hash(
+                                  ",".join(str(i) for i in forced_ids))))
+        except Exception as post_err:
+            _logger.error("MELI confirm waiting: no se pudo postear el aviso en SO id=%s: %s", self.id, post_err)
+        return {}
 
     def meli_create_invoice( self, meli=None, config=None):
         _logger.info("Meli Base meli_create_invoice")
@@ -1185,9 +1433,9 @@ class sale_order(models.Model):
         if d['so'] == _meli_cd.SO_SKIP:
             return False
 
-        # 3. MERCADERIA.
+        # 3. MERCADERIA (26.221: sujeta a los motivos de meli_oerp.cancel_return_reasons).
         if d['goods'] in (_meli_cd.GOODS_RETURN, _meli_cd.GOODS_CONFIG):
-            self._meli_return_done_pickings(config=config)
+            self._meli_cancel_goods_return(order_json=order_json, config=config, return_config=config)
 
         # 4. FACTURA.
         if d['cancel_drafts']:
@@ -1255,13 +1503,28 @@ class sale_order(models.Model):
         # FRESCA de ML (orden + pagos + envio) leida ANTES de escribir nada. Con 'legacy'
         # este metodo hace exactamente lo de siempre (salvo la parte 2: una factura ya
         # revertida por NC publicada deja de contar como "sin resolver").
+        # 26.171 (E2, 431): "Cancelaciones automáticas desde". Lo cancelado en ML ANTES de
+        # esa fecha no se acciona (ni devolución, ni factura, ni venta): queda retenido y a
+        # mano. Va ANTES de los dos modos y antes de cualquier red o escritura.
+        if self._meli_cancel_hold_by_cutoff(cancel_msg, order_json=order_json, config=config):
+            return False
+
         if self._meli_cancel_mode(config) == 'por_estado_ml':
             return self._meli_cancel_por_estado_ml(cancel_msg, order_json=order_json, meli=meli, config=config)
+
+        # 26.171 (E3, 431): pack dividido por ML (pack_splitted) en el modo legacy. Misma
+        # regla que `por_estado_ml` (pago acreditado sin reintegro): ML re-creó la venta con
+        # otro número, la mercadería y la plata siguen con la gemela => nunca devolución ni
+        # nota de crédito automática.
+        if self._meli_cancel_is_pack_splitted(order_json=order_json):
+            return self._meli_cancel_pack_splitted_legacy(cancel_msg, config=config)
 
         # 1. Devolver albaranes ya entregados
         # _meli_return_done_pickings usa hasattr para compatibilidad Odoo 16/17/18
         # (action_create_returns / create_returns) y evita crear devoluciones duplicadas.
-        self._meli_return_done_pickings()
+        # 26.221: solo si el motivo de ML esta en meli_oerp.cancel_return_reasons; si no,
+        # la venta se cancela igual (pasos 2-5) pero SIN devolucion, y queda marcada.
+        self._meli_cancel_goods_return(order_json=order_json, config=config)
 
         # 2. Gestionar facturas existentes — delegar a la política de configuración
         _has_unresolved_posted_invoice = False
@@ -1344,6 +1607,210 @@ class sale_order(models.Model):
             # propósito. Y NO se postea el cancel_msg: el chatter no afirma lo que no pasó.
             return False
 
+        return self._meli_cancel_finish(cancel_msg)
+
+    # ====================================================================== #
+    #  26.221 (T3LC #638): QUE MOTIVOS DEVUELVEN STOCK SOLOS                  #
+    # ====================================================================== #
+    # Vale para TODA cancelacion automatica de ML (barrido de estados #638, import,
+    # confirm_ml, 'esperando retorno') y para los dos modos (legacy / por_estado_ml):
+    # si el filtro estuviera solo en el barrido, la misma venta devolveria o no segun
+    # que cron la viera primero. Ver models/cancel_decision.py (funcion pura + default).
+    #
+    # Motivo fuera de la lista y salida hecha sin devolver:
+    #   - NO se crea la devolucion (el stock no sube);
+    #   - la venta se cancela igual que antes (facturas: misma politica que antes);
+    #   - queda meli_cancel_return_skipped=True + aviso en el chatter (una vez) + log
+    #     WARNING con la marca MELI_CANCEL_RETURN_SKIP.
+    # Reparacion / decision humana: llamar con context meli_cancel_return_any_reason=True
+    # (p.ej. so.with_context(meli_cancel_return_any_reason=True)._meli_cancel_goods_return())
+    # devuelve sin mirar el motivo y apaga la marca.
+
+    def _meli_cancel_return_reason_code(self, order_json=None):
+        """Motivo de la cancelacion: el de la foto de ML que trae el llamador; si no viene,
+        el ya guardado en la venta (OLA 3)."""
+        self.ensure_one()
+        if isinstance(order_json, dict):
+            code = (order_json.get("cancel_detail") or {}).get("code")
+            if code:
+                return code
+        return self.meli_cancel_reason_code or ""
+
+    def _meli_cancel_return_allowed(self, order_json=None):
+        """(permitido, motivo) segun el parametro meli_oerp.cancel_return_reasons."""
+        self.ensure_one()
+        code = self._meli_cancel_return_reason_code(order_json)
+        if self.env.context.get("meli_cancel_return_any_reason"):
+            return True, code
+        raw = self.env["ir.config_parameter"].sudo().get_param(_meli_cd.CANCEL_RETURN_REASONS_PARAM)
+        return _meli_cd.cancel_return_allowed(code, raw), code
+
+    def _meli_cancel_return_pending_pickings(self):
+        """Salidas HECHAS de la venta que todavia no tienen devolucion (mismo criterio de
+        'ya devuelta' que _meli_return_done_pickings)."""
+        self.ensure_one()
+        Move = self.env["stock.move"]
+        return self.picking_ids.filtered(
+            lambda p: p.state == "done" and p.picking_type_code == "outgoing"
+            and not Move.search_count([("origin_returned_move_id", "in", p.move_ids.ids),
+                                       ("state", "!=", "cancel")]))
+
+    def _meli_cancel_goods_return(self, order_json=None, config=None, return_config=None):
+        """Paso MERCADERIA de la cancelacion de ML, con el filtro de motivos (26.221).
+        `return_config` se pasa tal cual a _meli_return_done_pickings (legacy lo llama sin
+        config, por_estado_ml con la config efectiva: se respeta cada uno como era).
+        :return: True si se intento la devolucion, False si se salteo por el motivo."""
+        self.ensure_one()
+        allowed, code = self._meli_cancel_return_allowed(order_json)
+        if not allowed and self._meli_return_mode(return_config) != "none":
+            pending = self._meli_cancel_return_pending_pickings()
+            if pending:
+                if not self.meli_cancel_return_skipped:
+                    self.meli_cancel_return_skipped = True
+                _logger.warning(
+                    "MELI_CANCEL_RETURN_SKIP %s (orden ML %s): motivo '%s' fuera de %s -> NO se "
+                    "devuelve el stock de %s; la venta se cancela igual.",
+                    self.name, self.meli_order_id or "-", code or "(sin motivo)",
+                    _meli_cd.CANCEL_RETURN_REASONS_PARAM, ", ".join(pending.mapped("name")))
+                meli_message_post(
+                    self,
+                    "⚠️ Cancelación de MercadoLibre con motivo '%s': NO se devolvió automáticamente "
+                    "la mercadería de %s (sólo se devuelve sola con los motivos del parámetro del "
+                    "sistema '%s'). Revisar si la mercadería volvió y, si corresponde, hacer la "
+                    "devolución a mano." % (code or "sin motivo", ", ".join(pending.mapped("name")),
+                                            _meli_cd.CANCEL_RETURN_REASONS_PARAM),
+                    config=self._meli_cancel_config(config),
+                    once_key="cancel-return-skip-%s" % self.id)
+            return False
+        if return_config is not None:
+            self._meli_return_done_pickings(config=return_config)
+        else:
+            self._meli_return_done_pickings()
+        if self.meli_cancel_return_skipped and not self._meli_cancel_return_pending_pickings():
+            self.meli_cancel_return_skipped = False
+        return True
+
+    # ------------------------------------------------------------------ #
+    #  26.171 (E2, 431): "Cancelaciones automáticas desde"                 #
+    # ------------------------------------------------------------------ #
+    # Al subir a una versión que acciona las cancelaciones, el barrido de estados drena
+    # TODO el atraso (431: 3152 canceladas en ML abiertas en Odoo, 1806 con salida hecha)
+    # y con 'Crear y validar' valida devoluciones de paquetes que quizá nunca volvieron.
+    # Con la fecha de corte, lo cancelado antes queda RETENIDO: marcado, visible en los
+    # filtros y sin acción automática.
+    # Fecha comparada, en este orden:
+    #   1. meli_cancel_date      = cancel_detail.date de ML (o la del order_json fresco)
+    #   2. la "fecha:" que meli_status_detail trae en el texto desde hace años
+    #      (" | code: desc (solicitado por: x, fecha: 2026-09-15T10:00:00.000-04:00)")
+    #   3. la fecha de la VENTA en ML (meli_date_closed / meli_date_created) y, si no
+    #      está, date_order (que action_confirm reescribe con "ahora": último recurso).
+    #      Es conservador: una cancelación nunca es anterior a la venta, así que una venta
+    #      posterior al corte siempre se procesa y una anterior queda retenida aunque se
+    #      haya cancelado después (a mano).
+    _MELI_CANCEL_DATE_RE = re.compile(r"fecha:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.]+(?:Z|[+-][0-9]{2}:?[0-9]{2})?)")
+
+    def _meli_cancel_auto_from(self, config=None):
+        value = self._meli_cancel_setting('mercadolibre_cancel_auto_from', False,
+                                          config=self._meli_cancel_config(config))
+        return fields.Datetime.to_datetime(value) if value else False
+
+    def _meli_cancel_effective_date(self, order_json=None):
+        """(fecha UTC naive, origen) de la cancelación en ML. Ver el bloque de arriba."""
+        self.ensure_one()
+        cd = (isinstance(order_json, dict) and order_json.get('cancel_detail')) or {}
+        if cd.get('date'):
+            dt = ml_datetime(cd.get('date'))
+            if dt:
+                return fields.Datetime.to_datetime(dt), 'ML cancel_detail.date'
+        if self.meli_cancel_date:
+            return self.meli_cancel_date, 'ML cancel_detail.date'
+        m = self._MELI_CANCEL_DATE_RE.search(self.meli_status_detail or '')
+        if m:
+            dt = ml_datetime(m.group(1))
+            if dt:
+                return fields.Datetime.to_datetime(dt), 'detalle de estado de ML'
+        sold = self.meli_date_closed or self.meli_date_created or self.date_order
+        if sold:
+            return sold, 'fecha de la venta'
+        return False, ''
+
+    def _meli_cancel_hold_by_cutoff(self, cancel_msg, order_json=None, config=None):
+        """True si la cancelación queda RETENIDA por la fecha de corte (no se acciona)."""
+        self.ensure_one()
+        if self.state == 'cancel' or self.env.context.get('meli_cancel_ignore_cutoff'):
+            return False
+        cutoff = self._meli_cancel_auto_from(config)
+        if not cutoff:
+            return False
+        when, source = self._meli_cancel_effective_date(order_json=order_json)
+        if not when or when >= cutoff:
+            if self.meli_cancel_held:
+                self.meli_cancel_held = False
+            return False
+        vals = {'meli_cancel_held': True}
+        if not self.meli_cancel_date and source == 'ML cancel_detail.date':
+            vals['meli_cancel_date'] = when
+        if any(self[k] != v for k, v in vals.items()):
+            self.write(vals)
+        _logger.info("meli_cancel %s: RETENIDA por fecha de corte (%s < %s, %s)", self.name, when, cutoff, source)
+        meli_message_post(
+            self,
+            "Cancelación de MercadoLibre RETENIDA: ML canceló este pedido el %s (%s), antes de la fecha "
+            "configurada en 'Cancelaciones automáticas desde' (%s). No se canceló la venta, ni se creó la "
+            "devolución, ni se tocó la factura: se gestiona a mano (filtro 'MercadoLibre Cancelaciones "
+            "retenidas'). Motivo ML: %s" % (
+                fields.Datetime.to_string(when), source, fields.Datetime.to_string(cutoff), cancel_msg),
+            config=config, once_key="cancel-held-%s-%s" % (self.id, fields.Datetime.to_string(cutoff)))
+        return True
+
+    def action_meli_cancel_process_held(self):
+        """Acción manual: procesa la cancelación de ML de las ventas seleccionadas como lo
+        haría el cron, IGNORANDO 'Cancelaciones automáticas desde'."""
+        done = 0
+        for so in self.filtered(lambda o: o.meli_order_id and o.meli_status == 'cancelled' and o.state != 'cancel'):
+            cancel_msg = "Orden cancelada por MercadoLibre."
+            if so.meli_status_detail:
+                cancel_msg += " Motivo: %s" % so.meli_status_detail
+            so.with_context(meli_cancel_ignore_cutoff=True).meli_cancel_with_detail(cancel_msg)
+            if so.state == 'cancel':
+                so.meli_cancel_held = False
+                done += 1
+        return done
+
+    # ------------------------------------------------------------------ #
+    #  26.171 (E3, 431): pack_splitted en el modo legacy                   #
+    # ------------------------------------------------------------------ #
+    def _meli_cancel_is_pack_splitted(self, order_json=None):
+        self.ensure_one()
+        cd = (isinstance(order_json, dict) and order_json.get('cancel_detail')) or {}
+        code = (cd.get('code') or self.meli_cancel_reason_code or '').strip().lower()
+        if code:
+            return code == 'pack_splitted'
+        # Ventas importadas antes de la OLA 3: el código sólo está en el texto.
+        return 'pack_splitted' in (self.meli_status_detail or '')
+
+    def _meli_cancel_pack_splitted_legacy(self, cancel_msg, config=None):
+        """pack_splitted (modo legacy): sin devolución y sin nota de crédito. La venta se
+        cancela sólo si no hay salida hecha ni factura publicada; si las hay, queda retenida
+        con aviso para buscar la venta gemela (misma regla que por_estado_ml)."""
+        out_done = bool(self.picking_ids.filtered(
+            lambda p: p.state == 'done' and p.picking_type_code == 'outgoing'))
+        unresolved = self._meli_unresolved_posted_invoices()
+        if out_done or unresolved:
+            text = ("pack dividido por MercadoLibre (pack_splitted): ML re-creó la venta con otro número. "
+                    "No se crea devolución ni nota de crédito; la venta queda abierta para revisarla a mano "
+                    "(buscar la venta gemela)%s%s." % (
+                        out_done and "; tiene la salida hecha" or "",
+                        unresolved and "; factura publicada %s" % ", ".join(unresolved.mapped('name')) or ""))
+            if self.meli_cancel_decision != text:
+                self.meli_cancel_decision = text
+            meli_message_post(self, "⚠️ ACCIÓN REQUERIDA (cancelación de ML): %s Motivo ML: %s" % (text, cancel_msg),
+                              config=config, once_key="cancel-packsplit-%s" % self.id)
+            return False
+        text = ("pack dividido por MercadoLibre (pack_splitted): se cancela la venta sin devolución ni nota "
+                "de crédito (sin salida hecha ni factura publicada).")
+        if self.meli_cancel_decision != text:
+            self.meli_cancel_decision = text
         return self._meli_cancel_finish(cancel_msg)
 
     def _meli_unresolved_posted_invoices(self):
@@ -1509,6 +1976,17 @@ class sale_order(models.Model):
         # meli_oerp_multiple/models/connection_configuration.py y DEBE declarar
         # el MISMO default.
         config = self._meli_cancel_config(config)
+        # 26.171 (E3, 431): envío FULL => el stock lo gestiona MercadoLibre en su fulfillment.
+        # Nunca devolución automática a un almacén propio (en 18/19 el guard de "sin
+        # cantidades" NO las salteaba: mira la cantidad ENTREGADA, que es > 0). Es lo que ya
+        # decidía `por_estado_ml` (SHIP_FULFILLMENT => no mover stock) y lo que dice la ayuda.
+        if self.is_meli_order_fulfillment() and self.picking_ids.filtered(
+                lambda p: p.state == "done" and p.picking_type_code == "outgoing"):
+            _logger.info("_meli_return_done_pickings: %s es FULL -> no se crea devolucion", self.name)
+            meli_message_post(self, "Cancelación de ML: envío FULL (el stock lo gestiona MercadoLibre en su "
+                                    "fulfillment). No se crea devolución automática al almacén.",
+                              config=config, once_key="ret-full-%s" % self.id)
+            return
         return_mode = self._meli_return_mode(config)
         if return_mode == 'none':
             _logger.info(
@@ -1641,6 +2119,18 @@ class sale_order(models.Model):
                 meli_message_post(self, "No se pudo devolver el albarán %s automáticamente. Error: %s. Gestionar manualmente." % (picking.name, str(e)),
                                   once_key="ret-error-%s" % picking.id)
 
+    _MELI_READY_NOTE = "Monto correcto, listo para confirmar venta."
+
+    def _meli_ready_note_posted(self):
+        """True si la venta ya tiene el aviso 'Monto correcto…' (con o sin marca once:
+        las ventas anteriores a 26.171 lo tienen sin marca)."""
+        self.ensure_one()
+        if not self.id:
+            return False
+        return bool(self.env['mail.message'].sudo().search_count([
+            ('model', '=', self._name), ('res_id', '=', self.id),
+            ('body', 'like', self._MELI_READY_NOTE)], limit=1))
+
     def meli_confirm_ready( self, meli=None, config=None ):
         """Evalúa, SIN efectos secundarios, si la venta ML está lista para confirmar.
 
@@ -1750,7 +2240,12 @@ class sale_order(models.Model):
                 return {'error': serror}
 
             if (self.state in ['draft']):
-                meli_message_post(self, "Monto correcto, listo para confirmar venta.", config=config)
+                # 26.171 (E4, 431): el cron reintenta la confirmación cada ~10 min mientras la
+                # venta siga en cotización (p.ej. sin existencia) y este aviso se repetía en
+                # CADA pasada (prod 431: 4 veces en 25 min en la misma venta). Una vez por venta.
+                if not self._meli_ready_note_posted():
+                    meli_message_post(self, self._MELI_READY_NOTE, config=config,
+                                      once_key="confirm-ready-%s" % self.id)
 
             #check currency
             pricelist_is_meli = self.is_pricelist_meli(meli=meli, config=config)
@@ -2989,6 +3484,8 @@ class mercadolibre_orders(models.Model):
             'meli_status_detail': (order_json.get("status_detail") or '') + cancel_detail_text,
             # OLA 3 -- el motivo, estructurado. El texto de arriba NO cambia.
             'meli_cancel_reason_code': (cancel_detail.get("code") or ''),
+            # 26.171 (E2): la fecha de la cancelación, para "Cancelaciones automáticas desde".
+            'meli_cancel_date': (cancel_detail.get("date") and ml_datetime(cancel_detail.get("date"))) or False,
             'meli_total_amount': ("total_amount" in order_json and order_json["total_amount"]),
             'meli_paid_amount': ("paid_amount" in order_json and order_json["paid_amount"]),
             'meli_coupon_amount': ("coupon" in order_json and order_json["coupon"] and "amount" in order_json["coupon"] and order_json["coupon"]["amount"]) or 0.0,
@@ -5445,6 +5942,8 @@ class mercadolibre_orders(models.Model):
                             discount_pct, order.coupon_amount, total_gross,
                             len(non_delivery_lines), sorder.name,
                         )
+                        # [529] el cupon puede cambiar despues de creada la factura borrador
+                        meli_sync_draft_invoice_discounts(sorder)
             elif _coupon_mode == 'separate_line':
                 if _so_editable:
                     meli_apply_coupon_separate_line(sorder, order.coupon_amount)
@@ -5476,6 +5975,7 @@ class mercadolibre_orders(models.Model):
                                     "(coupon_invoice_mode=full)",
                                     line.id, sorder.name,
                                 )
+                        meli_sync_draft_invoice_discounts(sorder)
                     meli_remove_coupon_separate_line(sorder)
 
         if (1==1 or config.mercadolibre_cron_get_orders_shipment):
@@ -5878,6 +6378,8 @@ class mercadolibre_orders(models.Model):
                     order.sale_order.meli_status_detail = order.status_detail
                     # OLA 3 -- el motivo, estructurado (ver meli_cancel_reason_code).
                     order.sale_order.meli_cancel_reason_code = cancel_detail.get("code") or ''
+                    if cancel_detail.get("date"):
+                        order.sale_order.meli_cancel_date = ml_datetime(cancel_detail.get("date")) or False
                     if order_json["status"] in ("cancelled",):
                         sorder = order.sale_order
                         if sorder.meli_status != "cancelled":
@@ -6012,6 +6514,8 @@ class mercadolibre_orders(models.Model):
                     sorder.meli_status_detail = order.status_detail
                     # OLA 3 -- el motivo, estructurado (ver meli_cancel_reason_code).
                     sorder.meli_cancel_reason_code = cancel_detail.get("code") or ''
+                    if cancel_detail.get("date"):
+                        sorder.meli_cancel_date = ml_datetime(cancel_detail.get("date")) or False
                     if new_status == "cancelled" and sorder.state in ("draft", "sent", "sale", "done"):
                         cancel_msg = "Orden cancelada por MercadoLibre."
                         if sorder.meli_status_detail:

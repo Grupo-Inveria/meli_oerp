@@ -4,6 +4,31 @@
 
 ---
 
+## 19.0.26.222 — 13-oct-2026 · cancelaciones (pack dividido, fecha de corte), límite de despacho, línea de envío ME1 [#431 #158 #529]
+- **Pack dividido por MercadoLibre (`pack_splitted`) en el modo de cancelación `legacy`:** si la venta ya tiene la salida hecha o una factura publicada, **ya no se cancela**: queda abierta, sin devolución ni nota de crédito, con un aviso para buscar la venta gemela (la misma regla que el modo `por_estado_ml`). Antes la venta entregada se cancelaba. Sin salida ni factura, se cancela como siempre.
+- **«Cancelaciones automáticas desde»** (compañía y cuenta): lo que ML canceló antes de esa fecha queda **retenido** (marcado y en el filtro «Cancelaciones retenidas») en vez de procesarse solo. Vacío = como hasta ahora.
+- **«Venta sin existencia al confirmar»** (cuenta): confirmar como siempre / confirmar con la salida en espera / no confirmar hasta que haya existencia. Envíos FULL: nunca se crea devolución automática al almacén propio.
+- **Límite despacho ML:** se toma de `/shipments/{id}/sla` cuando ML no lo manda en el envío; columna opcional en pedidos y presupuestos. La migración llena la columna por SQL.
+- **#158** En ventas ME1 donde el pago trae el envío aparte, el importe a facturar incluye el flete: la línea de envío y lo cobrable coinciden y la línea deja de ir y venir.
+- El parámetro `meli_oerp.cancel_return_reasons` (26.221) sigue decidiendo qué motivos devuelven stock; el pack dividido entregado ya no llega a ese paso.
+- **#529** Si el cupón de ML cambia después de crear la factura en borrador, el descuento se re-sincroniza en el borrador (nunca en una factura publicada). El diagnóstico de stock descuenta el stock de seguridad.
+- Build único 26.222 en 16/17/18/19.
+
+## 19.0.26.221 — 13-oct-2026 · cancelaciones de ML: qué motivos devuelven el stock solos
+- **Nuevo parámetro del sistema `meli_oerp.cancel_return_reasons`** (Ajustes › Técnico › Parámetros del sistema):
+  motivos de cancelación de MercadoLibre (`cancel_detail.code`, separados por coma) con los que la mercadería ya
+  entregada se **devuelve automáticamente**. Por defecto **`buyer_cancel_express,fraud`**. `*` = todos los motivos
+  (el comportamiento anterior).
+- Con cualquier otro motivo (p. ej. `pack_splitted`, `shipment_not_delivered`, `mediations`, o sin motivo) la venta
+  se cancela igual que antes, pero **no se crea la devolución**: queda marcada «ML Cancelada sin devolución de
+  stock», con un aviso en el chatter, y se lista con el filtro **«ML: cancelada sin devolución de stock»** de Ventas.
+- Aplica a todas las cancelaciones automáticas de ML (barrido de estados, importación) y a los dos modos de
+  cancelación (`legacy` / `por_estado_ml`). Pedido de The 3 Letters (#638).
+- Sigue acompañando a meli_oerp_multiple 26.221 (sello de stock). Build único 26.221 en 16/17/18/19.
+
+## 19.0.26.221 — 12-oct-2026 · build de flota (sin cambios funcionales en este módulo)
+- Acompaña a meli_oerp_multiple 26.221: el sello de stock ya no deja abortada la operación que lo llama (validar devoluciones, botones y crons de otros módulos). Build único 26.221 en 16/17/18/19.
+
 ## 19.0.26.220 — 12-oct-2026 · build de flota (sin cambios funcionales en este módulo)
 - Acompaña a meli_oerp_multiple 19.0.26.220: el ajuste de redondeo del total usaba `tax_id` en Odoo 19 (`tax_ids`) y fallaba en silencio. Build único 26.220 en 16/17/18/19.
 
@@ -64,6 +89,12 @@ Además: `.gitignore` deja afuera el bytecode también dentro de `.roots/`. Buil
 - Las ventas de MercadoLibre ya no quedan en "Listo para enviar" para siempre: el barrido periódico de estados
   vuelve a consultar también el **envío** (enviado, entregado, no entregado) de las órdenes abiertas, por turnos.
 - Se puede desactivar con el parámetro del sistema `meli_oerp.resync_shipment_status = 0`.
+## 19.0.26.194 — 7-oct-2026 · La línea de envío deja de ir y venir [#158]
+- En ventas donde MercadoLibre informa el envío en el pago pero no en el total pagado, el importe a facturar ahora
+  incluye ese envío. La línea de envío y lo que se factura usan el mismo monto: la línea ya no pasa de $0 al
+  envío y vuelta en cada actualización, y la factura sale con el envío.
+- Incluye el cambio #620 (26.180).
+
 ## 19.0.26.180 — 3-oct-2026 · La línea de envío lleva lo que pagó el comprador [#620]
 - La línea de envío de la venta toma el costo que MercadoLibre informa como pagado por el comprador. Ya no queda en
   $0 en unas ventas y con monto en otras, y el importe a facturar incluye ese envío.
@@ -79,6 +110,21 @@ Además: `.gitignore` deja afuera el bytecode también dentro de `.roots/`. Buil
   impuestos de venta no incluidos del producto: el total de la venta en Odoo es lo cobrado en ML.
 - **Sin cambios** en la publicación de precios, ni para quien tiene *impuestos excluidos* o impuestos
   con precio incluido.
+## 19.0.26.171 — 1-oct-2026 · casos especiales de confirmación y cancelación [Tus Refacciones 431]
+- **"Venta sin existencia al confirmar = Confirmar siempre" ahora también funciona con la ruta "Obtener bajo
+  pedido (MTO)" estándar de Odoo** (antes sólo con la variante "Tomar del stock, si no disponible, ordenar"). La
+  venta se confirma y la salida queda en espera aunque la compra no se pueda generar.
+- **Nueva opción "Cancelaciones automáticas desde"** (cuenta de MercadoLibre y compañía): lo que MercadoLibre
+  canceló antes de esa fecha no se procesa solo — queda marcado ("ML Cancelación retenida") y en el filtro
+  *MercadoLibre Cancelaciones retenidas (anteriores al corte)* para revisarlo a mano, o procesarlo con la acción
+  *MercadoLibre: procesar cancelación ignorando la fecha de corte*. Vacía = como hasta ahora.
+- **Envíos FULL:** al cancelarse, ya no se crea una devolución al almacén propio (el stock lo maneja
+  MercadoLibre).
+- **Pack dividido por MercadoLibre (pack_splitted):** no se crea devolución ni nota de crédito; si la venta ya
+  tenía la salida hecha o una factura publicada, queda abierta con un aviso para revisar la venta gemela.
+- El aviso *"Monto correcto, listo para confirmar venta."* se publica una sola vez por venta.
+
+---
 ## 19.0.26.159 — 29-sep-2026 · build de flota
 - Sin cambios de código en esta serie: el número se alinea con 18.0.26.159 (#504/#520, descuento de vendedor y
   envío decididos juntos — la opción de tope existe sólo en 18.0).
