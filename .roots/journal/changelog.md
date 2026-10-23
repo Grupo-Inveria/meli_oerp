@@ -4,12 +4,162 @@
 
 ---
 
+## 19.0.26.296 — 23-oct-2026 · Vincular variante: el aviso refleja si la vinculación quedó (meli_oerp_multiple)
+- Sin cambios funcionales en este módulo (acompaña).
+- Build único 19.0.26.296 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.295 — 23-oct-2026 · un usuario interno sin grupos de conectores ya puede abrir y editar Contactos [#583]
+- Sin cambios funcionales en este módulo (acompaña).
+- Build único 19.0.26.295 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting, meli_oerp_autofacturacion y odoo_connector_api.
+
+## 19.0.26.294 — 23-oct-2026 · México: opción para corregir el régimen fiscal por defecto (601) con el dato de MercadoLibre
+- **Nueva opción, apagada por defecto**: *México: corregir régimen/uso CFDI por defecto (601/G03) con el dato de ML* (`mercadolibre_mx_cfdi_override_default`), en la pestaña de configuración de MercadoLibre de la compañía (y en la configuración de cada cuenta con meli_oerp_multiple).
+- Odoo crea los contactos mexicanos con régimen 601 por defecto: personas físicas (612) o público en general (616) ya cargados quedaban con un régimen que no es el suyo y 26.292 no los corregía. Con la opción prendida, si el contacto tiene 601 y ML informa otro código válido, se escribe el de ML (log `MX_CFDI override 601→612`). Uso de CFDI (G03 → p. ej. S01) con la misma regla.
+- Nunca se pisa un valor distinto del default (carga manual) ni un contacto bloqueado para MercadoLibre. Apagada: igual que 26.292 (sólo completa vacíos). Sin `l10n_mx_edi`: sin cambios.
+- Build único 19.0.26.294 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.292 — 23-oct-2026 · México: régimen fiscal y uso de CFDI del comprador se toman de MercadoLibre
+- **MLM con `l10n_mx_edi`**: el régimen fiscal (`l10n_mx_edi_fiscal_regime`, p. ej. 601/612/616) y el uso de CFDI (`l10n_mx_edi_usage`, p. ej. G01/G03/S01) que ML informa en los datos de facturación del comprador ahora se cargan en el contacto de facturación. Antes había que cargarlos a mano.
+- Contacto creado por la importación: toma el dato de ML. Contacto existente: sólo se completan los campos **vacíos**; un valor cargado a mano **no se pisa** (queda en el log `MX_CFDI`). Contactos fijos de la configuración (bloqueados) no se tocan.
+- Uso de CFDI en la venta (17.0+ con `l10n_mx_edi_sale`, que lo pasa a la factura): venta nueva, o venta sin facturas con el uso vacío o en el default G03. En 16.0 el uso no vive en el contacto ni en la venta: sólo se carga el régimen.
+- Sin `l10n_mx_edi` instalado (otros países): sin cambios.
+- Build único 19.0.26.292 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.291 — 23-oct-2026 · el servicio de envío archivado o con la referencia cambiada ya no se duplica en cada venta [#452]
+- **Producto de servicio de envío** [#452]: al importar una venta, el módulo buscaba el producto de envío sólo entre los **activos** y, si no lo encontraba, creaba uno nuevo **antes** de mirar el producto del transportista. Con el servicio archivado (p. ej. para sacarlo de otra tienda) o con la referencia interna cambiada por una secuencia automática (`product_sequence`), se creaba un «ME1 - zip» nuevo en cada pasada del cron — y ni siquiera se usaba en la línea. Ahora se busca: activos (por referencia y por nombre) → producto del transportista → archivados; sólo se crea si no existe ninguno.
+- Productos duplicados ya creados no se borran solos: se eliminan a mano si no tienen ventas ni asientos.
+- Build único 19.0.26.291 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.289 — 22-oct-2026 · una venta de MercadoLibre que falla a mitad del lote del cron de órdenes se reintenta en la corrida siguiente [#543]
+- Sin cambios funcionales en este módulo (acompaña).
+- Build único 19.0.26.289 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.288 — 22-oct-2026 · cancelaciones por motivo: pack dividido devuelve si la venta gemela ya tiene su salida [#624]
+- **Pack dividido (`pack_splitted`) con la política `meli_oerp.cancel_reason_policy = by_reason`** [#624]: si la venta gemela (mismo comprador y producto, creada por ML al dividir el paquete) está en Odoo y tiene **su propia salida hecha**, la venta cancelada se cancela y **se devuelve su salida** (como A/B), con una nota que nombra la gemela y las dos salidas: sin esto quedaban dos salidas por un solo envío. Si la gemela no tiene salida propia o no está en Odoo: como antes, nota + actividad, sin devolución.
+- FULL: la devolución respeta `meli_oerp.cancel_return_full`. Sin la política activa, `pack_splitted` sigue como siempre.
+- Build único 19.0.26.288 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.287 — 22-oct-2026 — landeo #529 26.245 + 26.249 (build de flota 26.287)
+- Landeo en origin de `claude/529-cupon-facturada-19.0` (26.245) y `claude/529-descuento-vendedor-iva-19.0` (26.249), renumerados a 26.287.
+- Merge con 26.229 (cupón del vendedor prorrateado con `items_total` + guarda de precio negativo): se conserva el prorrateo de 26.229; de 26.249 queda el salto de los detalles `type=discount` (oferta ya en `unit_price`), la guarda de venta confirmada, el IVA de una sola compañía y el 401.
+- 26.245 combinado con 26.229: la guarda de factura posteada va ANTES del reparto del cupón.
+- `rjson.get("error")` en el refresh: con el 401 sin clave `error` el `rjson["error"]` daba KeyError.
+
+## 19.0.26.249 — 19-oct-2026 · descuento del vendedor restado dos veces, IVA de una sola compañía, 401 de ML [#529 #543]
+- **#529 Descuento del vendedor:** una **oferta de precio** de ML (`/discounts` tipo `discount`) ya viene dentro del precio unitario; el importador la volvía a restar. Ej. Kindon: precio ML 54.312,50 (lista 55.000 − oferta 687,50) entraba como 53.625 y la venta quedaba 689,56 por debajo de lo cobrado. Ahora sólo se resta lo que no está en el precio (p. ej. el cupón financiado por el vendedor), y el importe a controlar/facturar usa el mismo valor.
+- **#529** El descuento del vendedor, que es de la **orden**, se **prorratea** entre sus ítems (antes se restaba entero en cada línea).
+- **#529** Una venta ya **confirmada** no recibe un descuento del vendedor nuevo al re-sincronizar: sus líneas no se reescriben, y cambiarlo dejaba el control de importe desalineado.
+- **#543 Multicompañía:** al importar precios de ML (y al publicarlos con «impuestos excluidos») se usa sólo el IVA de la compañía de la configuración. Un producto con el IVA de dos compañías dividía por 1,42 en vez de 1,21.
+- **«Tax Included = Configuración del sistema» (`auto`):** queda explícito que en Odoo 17+ equivale a «impuestos incluidos» (el grupo que consultaba existe sólo hasta 16). **No cambia ningún precio publicado.** Las ventas importadas ya se netean siempre desde 26.185 (#486).
+- **#529** Un **401 de token vencido** de ML (que viene sin `error`) ahora dispara el refresh del token.
+- Build único 26.249 en 16/17/18/19 (con meli_oerp_multiple 26.249).
+## 19.0.26.245 — 19-oct-2026 · el cupón de ML ya no cambia una venta facturada [#529]
+- **#529** Si la venta ya tiene una factura de cliente **publicada**, la actualización de la orden de ML ya no reescribe el descuento del cupón en sus líneas: venta y factura quedan con el mismo importe. Las ventas sin factura o con factura en borrador siguen recibiendo el cupón como antes.
+## 19.0.26.284 — 22-oct-2026 · una venta de MercadoLibre ya no se crea dos veces [#431]
+- **Venta duplicada:** cuando dos procesos traían la misma venta de MercadoLibre al mismo tiempo (las notificaciones y el repaso periódico de ventas), se creaban dos ventas, dos envíos y el contacto dos veces. Ahora cada venta (o carrito) la importa un solo proceso: el otro la saltea y la venta queda una sola vez.
+- Requiere actualizar (`-u meli_oerp,meli_oerp_multiple`); sin campos nuevos. Build único 26.284 en 16/17/18/19.
+
+## 19.0.26.283 — 22-oct-2026 · cancelaciones ML por motivo (opt-in) [#624] + botón Publicar Plazo [#609]
+- **Cancelaciones de MercadoLibre según el motivo** [#624] (opt-in, modo de cancelación `legacy`): con el parámetro del sistema `meli_oerp.cancel_reason_policy = by_reason`:
+  - cancelada por el comprador (`buyer_cancel_express`) y paquete cancelado por ML (`shipment_not_delivered` con el pago reintegrado): se cancela la venta y se devuelve la salida hecha;
+  - mediación/devolución (`mediations` con el pago reintegrado): se cancela la venta y la devolución queda **sin validar**, con una actividad «Revisar cancelación de MercadoLibre» para decidirla con la resolución del reclamo;
+  - ML **cubrió la venta** (pago `bpp_covered`: «Te dimos el dinero…», «Paquete no entregado. Te reembolsamos…»): **venta concretada**, no se cancela ni se devuelve; nueva marca «ML Cancelada con venta cubierta por ML», nuevo filtro, y sale del filtro «Canceladas pendientes en Odoo» y del banner;
+  - pack dividido (`pack_splitted`): sin devolución automática; la nota nombra la **venta gemela** y su salida, y se agenda una actividad;
+  - motivo ambiguo sin dato de pago: no se acciona, actividad de revisión. El dato de pago sale del `order_json` o de la foto fresca de ML (GET con timeout antes de escribir).
+- `meli_oerp.cancel_return_full = 1`: con la política activa, las devoluciones de envíos **FULL** se crean (para quien lleva el stock del depósito FULL en Odoo).
+- Sin los parámetros, el comportamiento es el de siempre.
+- Build único 19.0.26.283 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.282 — 22-oct-2026 · las direcciones de entrega y factura cambiadas a mano ya no vuelven a la original al sincronizar [#513]
+- Si en un pedido de ML se cambia a mano el contacto de entrega o de factura, o la calle/ciudad/teléfono del contacto de entrega, la re-sincronización desde ML (cron, notificación o «Actualizar») lo respeta. Si nadie lo tocó, un cambio de dirección hecho en ML sigue entrando.
+- Pestaña MercadoLibre del pedido: «Factura puesta por ML» / «Entrega puesta por ML» (sólo lectura).
+- Pedidos anteriores a esta versión cuya entrega/factura no es el propio cliente se consideran fijados (no se re-sincroniza su dirección).
+- Sólo meli_oerp en este build; el resto del suite se alinea en el próximo build de flota.
+
+## 19.0.26.280 — 22-oct-2026 · la actualización de stock de una entrada grande ya no se pierde en silencio [#475]
+- Sin cambios funcionales en este módulo (acompaña).
+- Build único 19.0.26.280 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.279 — 22-oct-2026 · panel CRONs: «Ejecutar ahora» con lock y contador de la corrida de precios [#427]
+- Sin cambios funcionales en este módulo (acompaña).
+- Build único 19.0.26.279 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.273 — 22-oct-2026 · número de la retención del pago = ID de operación de MercadoPago [#484]
+- Sin cambios funcionales en este módulo (acompaña).
+- Build único 19.0.26.273 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.272 — 22-oct-2026 · reintento de etiquetas de envíos buffered: cola y ventana desde la liberación [#158]
+- Sin cambios funcionales en este módulo (acompaña).
+- Build único 19.0.26.272 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.271 — 22-oct-2026 · ventas ML: adopción de línea sin vínculo, carrito de una orden y carrito parcial [#431]
+- **Ventas ML sin líneas duplicadas** [#431]: al sincronizar, si la venta tiene una línea del mismo producto sin vínculo ML (p. ej. la que deja cancelar y reconfirmar a mano) se la **adopta** escribiéndole los ids de ML en vez de crear otra; en una venta confirmada sin candidata no crea y deja **una** nota de control por ítem. Igual en las líneas de un pack.
+- **Carrito de una orden**: una venta de carrito con una sola orden toma el estado cancelado de ML.
+- **Carrito parcial**: si ML cancela una sola orden de un carrito, la venta no se cancela entera mientras quede alguna orden vigente (nota única); la última cancelación sigue el camino de siempre.
+- Build único 19.0.26.271 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.270 — 22-oct-2026 · pagos salientes ML con línea de método explícita + aviso de dinero sin registrar siempre visible
+- Avisos de **dinero sin registrar** (cobro o pago de ML que no se pudo crear) quedan **siempre** en el chatter: con el modo de notificaciones «Desactivadas» van como nota interna (sin inbox), una vez por pago. Nuevo `meli_money_block_post` y parámetro `force_chatter` en `meli_message_post`; el help del modo lo documenta.
+- Build único 19.0.26.270 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.269 — 22-oct-2026 · cobros ML con línea de método explícita + lectura de mercadolibre.client [#526 #630 #542]
+- Nuevo helper `meli_payment_method_line_for(journal, tipo, partner)` en `models/versions.py`: elige la línea de método de pago del diario que tenga «Cuenta de pagos pendientes» (o el default que la versión de Odoo aplique). Lo usan los cobros de meli_oerp_accounting y meli_oerp_multiple.
+- Build único 19.0.26.269 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.268 — 22-oct-2026 · release de flota: integración 462 (224–231) + aviso Publicar Stock [#462 #452]
+- **Filtros de Ventas ML** (ex 26.230): Sin confirmar, A facturar, Nada para facturar, Totalmente facturadas, Sin factura publicada, Factura en borrador, Con factura publicada, Con nota de crédito, Full / Flex / Colecta / Punto de entrega, reclamos y devoluciones.
+- **Línea de envío** (ex 26.231): se factura con el pago y no con la entrega; con envío $0 no deja el pedido en «Nada para facturar»; nunca se factura sola. La migración `migrations/19.0.26.268` recalcula el estado de facturación de las ventas ya confirmadas (renumerada desde 26.231 para que corra también en bases que ya están en 26.267).
+- Aviso «lo cobrado no coincide»: nombra el ítem sin producto y se publica una sola vez (ex 26.231).
+- Cupón a cargo del vendedor, prorrateado por ítem y sin llevar nunca un precio a cero; envío pagado por el comprador tomado de los pagos; cupón + descuento sin restar dos veces; venta de un pack cancelado entero toma el estado; la sincronización no agrega líneas a una venta confirmada (ex 26.229).
+- Import de órdenes: el contacto de facturación sólo se escribe si algo cambió (ex 26.228). Textos neutros (ex 26.227).
+- Guarda del pre-migrate 26.222 cuando la base viene de un build anterior a 26.16 (ex 26.226). URLs de la API armadas con el host configurado y sin SDK (ex 26.225). Etiquetas: descarga separada de su escritura (ex 26.224).
+- Build único 19.0.26.268 en 16/17/18/19 para meli_oerp, meli_oerp_stock, meli_oerp_multiple, meli_oerp_accounting y meli_oerp_autofacturacion = 26.267 + integración 224–231 (nunca landeada hasta hoy) + #452.
+
+## 19.0.26.267 — 22-oct-2026 · release de flota [#525 #539 #526]
+- 267 = release flota: 265 #525 + 266 #539 + 267 #526. Sin cambios funcionales nuevos en este módulo en este build (acompaña).
+- Build único 26.267 en 16/17/18/19 para meli_oerp, meli_oerp_multiple, meli_oerp_stock, meli_oerp_accounting y meli_oerp_autofacturacion.
+
+## 19.0.26.265 — 22-oct-2026 · integración del pase de ROEN [#525]
+- incluye #611 (diagnóstico de stock no reactiva sin stock publicable; REACTIVADA sólo verificada, ex 26.257) y #615 (enlace del reclamo a la mediación, ex 26.259).
+- Build único 26.265 en 16/17/18/19 para meli_oerp, meli_oerp_multiple, meli_oerp_stock y meli_oerp_accounting.
+
+## 19.0.26.257 — 21-oct-2026 · el diagnóstico de stock ya no «reactiva» lo que no puede publicar [#611]
+- **#611** El control automático **Meli Stock Diagnostic** ya no intenta reactivar una publicación pausada cuando la existencia que ve está en ubicaciones de las que esa publicación **no publica** (p.ej. sólo en Full): calcula la cantidad con la misma regla que el envío de stock.
+- Sólo anota **«REACTIVADA»** si Mercado Libre la muestra activa después; si sigue pausada lo dice (**«NO QUEDÓ ACTIVA»**, con el motivo que informa ML).
+- Build único 26.257 en 16/17/18/19 (junto con meli_oerp_multiple 26.257).
+## 19.0.26.259 — 21-oct-2026 · el enlace del reclamo abre la mediación en el panel del vendedor [#615]
+- **#615** En una **mediación**, «Claim Link» abre ahora la mediación en el panel del vendedor: `https://vendedores.<dominio>/ventas/nueva/mensajeria/<pack o, si no hay, orden>/mediacion/<reclamo>`. Antes abría `www.<dominio>/reclamos/<reclamo>`, que Mercado Libre redirige a la venta.
+- Devoluciones y cancelaciones conservan el enlace anterior: el formato del panel para esos tipos no está confirmado.
+
 ## 19.0.26.246 — 19-oct-2026 · match de SKU por token (opcional) [#543]
 - **#543** Nueva opción **«Search SKU by token»** (`mercadolibre_sku_token_match`, por defecto **apagada**) y **«SKU token separators»** (default `- /`). Para catálogos donde el SKU de Mercado Libre trae el código de Odoo **más** una descripción (p.ej. `21342-ALIMENTO PERRO 20K` contra Referencia interna `21342`): se parte el SKU por los separadores y se vincula **sólo** si exactamente un trozo coincide con la Referencia interna de un único producto. Ningún trozo, dos trozos o código repetido en Odoo ⇒ no vincula (queda en el log). Es respaldo: corre después de la búsqueda exacta de siempre; apagada, todo funciona igual que antes.
 - Config de la compañía (pestaña de importación, junto a «Search SKU»). Aplica a la importación de publicaciones (`product_meli_get_products`) y a la búsqueda de producto al importar ventas (`orders.py`).
 
 ## 19.0.26.238 — 17-oct-2026 · build de flota (sin cambios funcionales en este módulo)
 - Acompaña a meli_oerp_multiple 26.238 (#361: stock de publicaciones pausadas en México). Build único 26.238 (sólo serie 19.0 en esta entrega).
+## 19.0.26.231 — 15-oct-2026 · estado de facturación correcto con la línea de envío, aviso de ítem sin producto [#462]
+- **Línea de envío de una venta ML:** se factura con el pago, no con la entrega. Con precio, entra en la factura junto al producto (antes podía quedar afuera y la factura salía por menos de lo cobrado); a $0 no tiene nada que facturar. Nunca se factura sola, sin el producto.
+- **Estado de facturación:** una venta ML facturada ya no muestra «Nada para facturar» ni «A facturar» por culpa de la línea de envío. Al actualizar, el estado de las ventas existentes se recalcula solo (sólo el estado: no se tocan facturas, importes ni entregas).
+- **Aviso «lo cobrado no coincide»:** ahora nombra el ítem de ML que no tiene producto en Odoo (ítem, SKU, título, cantidad, precio) y se publica una sola vez por motivo, no en cada sincronización.
+- Requiere actualizar el módulo (`-u meli_oerp`); migración 19.0.26.231 (recalcula el estado de facturación de ventas ML confirmadas).
+- Build único 26.231 en 16/17/18/19 para los 5 módulos del suite (integra 26.224–26.230).
+## 19.0.26.224 — 14-oct-2026 · etiquetas: la descarga se separa del guardado [#158]
+- **#158** La descarga de la etiqueta de Mercado Libre se separa de su guardado (nuevo `_meli_label_fetch_vals`), para que el reintento automático de meli_oerp_multiple pueda guardarla en una transacción corta. La impresión manual y el asistente funcionan igual que antes.
+- Build único 26.224 en 16/17/18/19.
+## 19.0.26.229 — 15-oct-2026 · cupón del vendedor en la venta, envío del comprador, cancelación de packs, sin líneas nuevas en ventas confirmadas
+- **Cupón a cargo del vendedor:** si MercadoLibre informa que el cupón lo paga el vendedor (`/orders/{id}/discounts`, `amounts.seller`), la venta **nace con el descuento** (precio de la línea = precio de ML − descuento del vendedor) y la factura sale por lo que pagó el comprador. Antes la venta nueva se creaba a precio lleno. El descuento se reparte entre los ítems si la orden trae más de uno. También se consulta cuando el cupón viene sólo en el pago. En los modos «cupón como descuento» / «cupón en línea aparte» se imputa sólo la parte que financia ML (sin descontarlo dos veces).
+- **Envío pagado por el comprador:** si el pago trae el envío y la venta no lo tenía registrado (`meli_shipping_amount` en 0, visto en cross_docking), se toma del pago: la venta cuadra y deja de figurar «Incompleta».
+- **Cupón + descuento del vendedor:** cuando la venta ya tiene el descuento en el precio, el importe a facturar ya no lo vuelve a restar del pago. Sólo en ese caso y sólo si el cálculo anterior no cuadraba; el resto queda igual.
+- **Cancelación de packs:** si MercadoLibre cancela **todas** las órdenes de un pack, la venta pasa a cancelada por el camino de siempre (fecha de corte, pack dividido y devoluciones sin cambios).
+- **Sin líneas nuevas en ventas confirmadas:** la sincronización ya no agrega líneas a una venta confirmada o bloqueada (p. ej. después de cancelarla y reconfirmarla a mano).
+- Requiere actualizar el módulo (`-u meli_oerp`): campo nuevo `discount_seller_coupon_amount` en órdenes ML (se crea solo, sin migración de datos).
+- Build único 26.229 en 16/17/18/19.
+## 19.0.26.230 — 15-oct-2026 · filtros de facturación, logística y reclamos en Ventas [#462]
+- **Nuevo «ML Factura»** en las ventas: *Sin factura / Factura en borrador / Facturada / Con nota de crédito*. Dice qué facturas **tiene** la venta; el «Estado de facturación» nativo dice si **queda algo por facturar** (por eso una venta ya facturada, o con la entrega sin validar, muestra «Nada para facturar»).
+- **Filtros nuevos** en Pedidos y en Cotizaciones (todos «ML · …»): Sin confirmar, A facturar, Nada para facturar, Totalmente facturadas, Sin factura publicada, Factura en borrador, Con factura publicada, Con nota de crédito, Full, Flex, Colecta, Punto de entrega, Con reclamo abierto y Con devolución (reclamo de ML) — estos dos, para usuarios con permiso de MercadoLibre.
+- **Agrupar por** «ML · Estado de facturación» (ambas) y «ML · Tipo de logística» (Pedidos).
+- Sin columnas nuevas ni migración: requiere actualizar el módulo (`-u meli_oerp`).
+- Build único 26.230 en 16/17/18/19.
 
 ## 19.0.26.223 — 13-oct-2026 · stock de seguridad en el diagnóstico, fecha de la venta al confirmar, devoluciones canceladas, aviso de seguridad [#529 #640 #641]
 - **#529** El diagnóstico de stock descuenta el stock de seguridad **por SKU según las Reglas de SKU tipo «Stock Rule»** (columna «Quantity Stock»; el SKU exacto gana sobre `*`), igual que el envío de stock: ya no reactiva ni «corrige» publicaciones que el resguardo deja en 0 a propósito. Sin reglas, igual que antes. El campo «Stock de seguridad (ML)» de 26.208 ya no se lee.

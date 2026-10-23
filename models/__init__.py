@@ -9,6 +9,7 @@
 from . import versions
 from . import warning
 from . import meli_util
+from . import import_lock
 from . import company
 from . import product_image
 from . import product
@@ -19,6 +20,7 @@ from . import product_post
 from . import questions
 from . import claim
 from . import orders
+from . import sale_order_invoice_state
 from . import res_partner
 #from . import currency
 from . import shipment

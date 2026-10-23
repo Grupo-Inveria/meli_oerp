@@ -28,7 +28,8 @@
                   <filter string="MercadoLibre Canceladas pendientes en Odoo" name="sale_orders_ml_cancel_pending"
                           domain="[('meli_order_id','!=',False),
                                    ('meli_status','=','cancelled'),
-                                   ('state','!=','cancel')]" />
+                                   ('state','!=','cancel'),
+                                   ('meli_cancel_covered','=',False)]" />
                   <!-- 26.171 (E2): canceladas en ML antes de 'Cancelaciones automáticas desde'. -->
                   <filter string="MercadoLibre Cancelaciones retenidas (anteriores al corte)" name="meli_cancel_held_filter"
                           domain="[('meli_cancel_held', '=', True), ('state', '!=', 'cancel')]"/>
@@ -42,10 +43,13 @@
                           context="{'group_by' : 'meli_cancel_reason_code'}" name="meli_cancel_reason_code_filter"/>
                   <filter string='Cancelación esperando retorno' name="meli_cancel_waiting_return_filter"
                           domain="[('meli_cancel_waiting_return', '=', True)]"/>
-                  <!-- 26.221 (T3LC #638): canceladas por ML con un motivo fuera de
+                  <!-- 26.221 (un cliente): canceladas por ML con un motivo fuera de
                        meli_oerp.cancel_return_reasons => la mercaderia NO se devolvio sola. -->
                   <filter string='ML: cancelada sin devolución de stock' name="meli_cancel_return_skipped_filter"
                           domain="[('meli_cancel_return_skipped', '=', True)]"/>
+                  <!-- 26.278 (#624): ML canceló pero le pagó la venta al vendedor (bpp_covered). -->
+                  <filter string='ML: cancelada con venta cubierta por ML' name="meli_cancel_covered_filter"
+                          domain="[('meli_cancel_covered', '=', True)]"/>
                 </xpath>
             </field>
         </record>
@@ -81,7 +85,8 @@
                   <filter string="MercadoLibre Canceladas pendientes en Odoo" name="sale_orders_ml_cancel_pending"
                           domain="[('meli_order_id','!=',False),
                                    ('meli_status','=','cancelled'),
-                                   ('state','!=','cancel')]" />
+                                   ('state','!=','cancel'),
+                                   ('meli_cancel_covered','=',False)]" />
                   <!-- 26.171 (E2): canceladas en ML antes de 'Cancelaciones automáticas desde'. -->
                   <filter string="MercadoLibre Cancelaciones retenidas (anteriores al corte)" name="meli_cancel_held_filter"
                           domain="[('meli_cancel_held', '=', True), ('state', '!=', 'cancel')]"/>
@@ -95,10 +100,13 @@
                           context="{'group_by' : 'meli_cancel_reason_code'}" name="meli_cancel_reason_code_filter"/>
                   <filter string='Cancelación esperando retorno' name="meli_cancel_waiting_return_filter"
                           domain="[('meli_cancel_waiting_return', '=', True)]"/>
-                  <!-- 26.221 (T3LC #638): canceladas por ML con un motivo fuera de
+                  <!-- 26.221 (un cliente): canceladas por ML con un motivo fuera de
                        meli_oerp.cancel_return_reasons => la mercaderia NO se devolvio sola. -->
                   <filter string='ML: cancelada sin devolución de stock' name="meli_cancel_return_skipped_filter"
                           domain="[('meli_cancel_return_skipped', '=', True)]"/>
+                  <!-- 26.278 (#624): ML canceló pero le pagó la venta al vendedor (bpp_covered). -->
+                  <filter string='ML: cancelada con venta cubierta por ML' name="meli_cancel_covered_filter"
+                          domain="[('meli_cancel_covered', '=', True)]"/>
                   <filter string='MercadoLibre Status' domain="[]"
         								context="{'group_by' : 'meli_status'}" name="meli_status_filter"/>
                   <!--filter string='MercadoLibre Status Brief' domain="[]"
@@ -192,6 +200,8 @@
                               <field name="meli_buyer_nickname"/>
                               <field name="meli_buyer_id"/>
                               <field name="meli_update_forbidden" string="No actualizar desde ML"/>
+                              <field name="meli_partner_invoice_auto_id" readonly="1"/>
+                              <field name="meli_partner_shipping_auto_id" readonly="1"/>
                               <field name="meli_order_id" invisible="0"/>
                               <field name="meli_status" invisible="0"/>
                               <field name="meli_unread_messages" readonly="1"
@@ -216,6 +226,7 @@
                                      decoration-muted="meli_handling_limit_status == 'none'"/>
                               <field name="meli_cancel_reason_code" readonly="1" invisible="0"/>
                               <field name="meli_cancel_return_skipped" readonly="1" invisible="not meli_cancel_return_skipped"/>
+                              <field name="meli_cancel_covered" readonly="1" invisible="not meli_cancel_covered"/>
                               <field name="meli_cancel_waiting_return" readonly="1" invisible="not meli_cancel_waiting_return"/>
                               <field name="meli_cancel_decision" readonly="1" invisible="not meli_cancel_decision"/>
                               <field name="meli_status_detail" invisible="0"/>
@@ -625,7 +636,7 @@
                 target="new"/-->
 
 
-        <!-- #585: reparación de ventas confirmadas con moves en borrador sin entrega
+        <!-- un caso: reparación de ventas confirmadas con moves en borrador sin entrega
              (abastecimiento fallido). Re-lanza dentro de un savepoint; resultado en el chatter. -->
         <record id="action_meli_relaunch_procurement_server" model="ir.actions.server">
             <field name="name">MELI: Relanzar abastecimiento</field>
@@ -647,7 +658,7 @@
             <field name="code">records.action_meli_cancel_process_held()</field>
         </record>
 
-        <!-- Columna opcional "Límite despacho ML" en la lista de pedidos (#431) -->
+        <!-- Columna opcional "Límite despacho ML" en la lista de pedidos (un caso) -->
         <record id="sale_order_tree_meli_handling_limit" model="ir.ui.view">
             <field name="name">sale.order.list.meli.handling.limit.sale_order_tree</field>
             <field name="model">sale.order</field>

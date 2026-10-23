@@ -4,7 +4,7 @@
 MODULO PURO: no importa nada de Odoo ni hace red. Todo lo que hay aca se prueba con
 una tabla de casos sin levantar un servidor (tests/test_cancel_decision_pure.py).
 
-Indicacion de diseno de FCA (29-sep-2026, frente 431 TusRefacciones):
+Indicacion de diseno de Moldeo (29-sep-2026, frente un cliente):
     "basar el mapeo de cada tipo de cancelacion a parametros que veas son fundamentales,
      consultando los status actualizados de la orden y pagos y envios de meli ANTES de
      accionar".
@@ -351,9 +351,9 @@ def _text(ctx, d):
 
 
 # ====================================================================================== #
-#  26.221 (T3LC #638) -- QUE MOTIVOS DE CANCELACION DEVUELVEN STOCK SOLOS                 #
+#  26.221 (un cliente) -- QUE MOTIVOS DE CANCELACION DEVUELVEN STOCK SOLOS                 #
 # ====================================================================================== #
-# Pedido de la clienta (Sofia, T3LC 535) y OK de FCA el 13-oct-2026: la devolucion
+# Pedido de la clienta (un cliente) y OK de Moldeo el 13-oct-2026: la devolucion
 # AUTOMATICA de la mercaderia (crear y validar el IN de una salida ya hecha) solo para los
 # motivos en que la mercaderia vuelve con certeza. Con `pack_splitted` los items salen en
 # las ordenes NUEVAS del split, con `shipment_not_delivered` el paquete puede estar perdido
@@ -389,3 +389,73 @@ def cancel_return_allowed(reason_code, raw_param=None):
         return True
     code = (reason_code or "").strip().lower()
     return bool(code) and code in reasons
+
+
+# ====================================================================================== #
+#  26.278 (#624) -- POLITICA POR MOTIVO DE CANCELACION (opt-in, modo legacy)              #
+# ====================================================================================== #
+# Pedido de un cliente (motivos A-F), medido sobre 16 cancelaciones reales etiquetadas por
+# la clienta con el texto del panel de ML (22-oct-2026):
+#   A buyer_cancel_express                       -> cancelar + devolver la salida
+#   B shipment_not_delivered  (pago bpp_refunded) -> cancelar + devolver la salida
+#   C pack_splitted                              -> SIN devolucion automatica (la venta gemela
+#                                                    del split sigue viva): nota + actividad
+#   D mediations              (pago bpp_refunded) -> cancelar + devolucion EN BORRADOR + actividad
+#   E mediations              (pago bpp_covered)  -> venta CONCRETADA: no se cancela
+#   F shipment_not_delivered  (pago bpp_covered)  -> venta CONCRETADA: no se cancela
+# `cancel_detail.code` NO separa B de F ni D de E: lo que los separa es el `status_detail`
+# del pago. `bpp_covered` = el programa de proteccion de ML le pago la venta al vendedor
+# (10 de 10 casos B/D/E/F medidos sin excepcion). Sin dato de pago, un codigo ambiguo NO se
+# acciona (REASON_REVIEW): ante la duda no se cancela una venta que puede estar cobrada.
+#
+# Parametros del sistema:
+#   meli_oerp.cancel_reason_policy = by_reason   -> activa esta politica (vacio = como antes)
+#   meli_oerp.cancel_return_full   = 1           -> con la politica activa, las devoluciones de
+#                                                    envios FULL se crean (para quien lleva el
+#                                                    stock del deposito FULL en Odoo)
+CANCEL_POLICY_PARAM = "meli_oerp.cancel_reason_policy"
+CANCEL_POLICY_BY_REASON = "by_reason"
+CANCEL_RETURN_FULL_PARAM = "meli_oerp.cancel_return_full"
+
+REASON_RETURN = "return"                # A, B
+REASON_RETURN_REVIEW = "return_review"  # D
+REASON_COVERED = "covered"              # E, F
+REASON_PACK_SPLIT = "pack_splitted"     # C
+REASON_REVIEW = "review"                # codigo ambiguo sin dato de pago
+REASON_DEFAULT = "default"              # otro motivo: comportamiento de siempre
+
+POLICY_AMBIGUOUS_CODES = frozenset(["mediations", "shipment_not_delivered"])
+PAY_DETAIL_COVERED = frozenset(["bpp_covered"])
+
+
+def cancel_policy_enabled(raw_param):
+    """True si el parametro `meli_oerp.cancel_reason_policy` activa la politica por motivo."""
+    return str(raw_param or "").strip().lower() == CANCEL_POLICY_BY_REASON
+
+
+def param_is_true(raw_param):
+    return str(raw_param or "").strip().lower() in ("1", "true", "yes", "si", "sí", "on")
+
+
+def classify_cancel_reason(reason_code, status_details=None):
+    """Clase de la cancelacion para la politica por motivo. FUNCION PURA.
+
+    :param reason_code: cancel_detail.code de ML.
+    :param status_details: lista de payments[].status_detail de la orden (None = no se
+        consulto / no se sabe). Solo se mira para los codigos ambiguos.
+    :return: una de las constantes REASON_*.
+    """
+    code = (reason_code or "").strip().lower()
+    if code == "pack_splitted":
+        return REASON_PACK_SPLIT
+    if code == "buyer_cancel_express":
+        return REASON_RETURN
+    if code in POLICY_AMBIGUOUS_CODES:
+        details = set((d or "").strip().lower() for d in (status_details or []))
+        details.discard("")
+        if details & PAY_DETAIL_COVERED:
+            return REASON_COVERED
+        if not details:
+            return REASON_REVIEW
+        return REASON_RETURN_REVIEW if code == "mediations" else REASON_RETURN
+    return REASON_DEFAULT

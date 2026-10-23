@@ -4,11 +4,142 @@
 
 ---
 
+## 23 oct 2026 — servicio de envío archivado se recreaba por venta [#452 Global Value] (v19.0.26.291)
+**Síntoma:** productos «ME1 - zip» de servicio a $1 con referencias 001304..001322, ~uno por pasada del cron (21/22-oct).
+**Causa (combinada):** el cliente archivó los servicios de envío de los transportistas (ENVIO-ME1, MEL Distribution, Places Pickup) para sacarlos de TiendaNube; `_update_sale_order_shipping_info` buscaba sólo activos y creaba uno nuevo antes de mirar `carrier.product_id`; con `product_sequence` (OCA) la ref nueva no era ENVIO-ME1 y la búsqueda (sólo por default_code) nunca lo volvía a encontrar. El producto creado no iba a la línea.
+**Fix:** `mercadolibre.shipment._meli_find_shipping_product`: activos (ref y nombre) → producto del transportista (mapeo o delivery.carrier) → archivados; sólo crea si no hay ninguno. Ex rama claude/452-envio-archivado-<v> (26.274), rebaseada sobre 26.290.
+**Prueba:** tests/test_452_envio_archivado.py (tag meli_452, 8 casos; 2 de flujo real sobre _update_sale_order_shipping_info). Control origin 26.290: archivado ⇒ 2 productos, ref pisada 2 pasadas ⇒ 3 (uno por pasada). Fix 8/8 en 16-19.
+**No cubre:** los duplicados ya creados (se borran a mano si no tienen ventas/asientos).
+
+## 22 oct 2026 — pack_splitted devuelve si la gemela tiene salida propia [#624] (v19.0.26.288)
+#624 ROEN, medido: las gemelas de C tienen su PROPIA salida done (MLF/OUT/02339 cancelada + 02347 gemela; 02560 + 02561) ⇒ no devolver la de la cancelada deja doble salida. `_meli_cancel_by_reason` (REASON_PACK_SPLIT): salida propia done + gemela con salida done ⇒ ctx `meli_cancel_return_any_reason` + `meli_cancel_pack_split_return` (el legacy no corta en pack_splitted) y nota once `cancel-packsplit-twin-<id>`; si no ⇒ `_meli_cancel_pack_splitted_legacy` (nota + actividad). Tests `test_26278_cancel_por_motivo.py`: gemela con salida ⇒ devuelve (control origin 26.283 ROJO en 16-19), gemela sin salida / sin gemela ⇒ no devuelve (guardas). Fix 19/19 verde en 16-19.
+
+## 19 oct 2026 — #529 Kindon / #543 Petswagon: descuento del vendedor doble, IVA de todas las compañías, 401 (v19.0.26.249)
+**Síntoma (529):** orden 2000019046887762 (precio ML 54.312,50 = lista 55.000 − oferta del vendedor 687,50; cupón 2.062,50 100 % ML;
+pagó 52.250) entraba en 51.560,44: 689,56 por debajo de lo cobrado.
+**Causa:** `amounts.seller` de `/orders/{id}/discounts` suma también los detalles `type: "discount"` (oferta de PRECIO, ya
+descontada del `unit_price`); `_set_product_unit_price` la restaba otra vez, y además restaba el total de la ORDEN en cada
+ítem (`seller/qty`, sin prorratear). `meli_amount_to_invoice` resta el mismo valor ⇒ los dos errores se compensaban
+(venta 51.560,44 ≈ control 51.562,50): corregir sólo la línea dejaba la venta en «Condition not met».
+**Fix:** se excluye `type == 'discount'` al calcular `discount_seller_amount` (fuente única: lo heredan la línea y el control);
+prorrateo por subtotal del ítem; venta en sale/done no recibe un `meli_discount_seller_amount` nuevo. Validado contra 184
+detalles reales de `/discounts` (431 MX): `discount` 124 (siempre `funding_mode: seller`, total = unit_price), `coupon` 54, `cashback` 6.
+**#543:** `_meli_price_converted`, `_meli_set_product_price` y `set_meli_price` sumaban `taxes_id` de todas las compañías ⇒
+helper `ml_sale_tax_rates(taxes, company)`. **`auto`:** grupo `account.group_show_line_subtotals_tax_excluded` sólo existe ≤16;
+se deja explícito (17+ ⇒ False) SIN cambiar el significado: atarlo a `account_price_include` (default tax_excluded) subía ×1,21
+lo publicado de todo cliente 17+ con `auto` (`price_list_apply_tax=True`). El +21 % de órdenes de Kindon ya lo resolvía 26.185.
+**401:** helper `meli_is_auth_error()`; `get_new_instance` entra al refresh con `{"code":"unauthorized"}`.
+**Prueba:** tests/shell_529_descuento_vendedor_iva.py, banco Postgres 16/17/18/19 (11 checks). Control con origin: reproduce 53.625 y 85,21.
+**No cubre:** ventas ya importadas con el descuento doble (no se re-precian: corrección manual o re-importar en borrador).
+## 19 oct 2026 — #529 UniversoPets: el cupón re-descontaba ventas ya facturadas (v19.0.26.245)
+**Síntoma:** SO 19396 (ML 2000019028383918) facturada FA-B 00003-00000065 por 54.312,35; seis minutos después OdooBot
+bajó la venta a 54.009,56 ⇒ venta ≠ factura.
+**Causa:** el bloque del cupón de `orders_update_order_json` (modos product_discount / separate_line / full) sólo
+excluía SO `done`/`locked`; en `sale` con factura posteada recalculaba `line.discount` sobre el `price_unit` vigente.
+**Fix:** `_so_editable = False` si la SO tiene una `out_invoice` **posteada**. No se usa `qty_invoiced` porque cuenta
+borradores y el borrador sí debe seguir el cupón (`meli_sync_draft_invoice_discounts`, sólo 19.0).
+**Prueba:** banco local, texto literal del bloque sobre SO real: control (origin) reproduce 54.312,35 → 52.248,48 con
+factura 54.312,35; con fix venta == factura. Rama `claude/529-cupon-facturada-19.0`.
+## 22 oct 2026 — #431 venta ML doble por importación en paralelo (v19.0.26.284)
+Barrido `CRON_UNPROCESSED_ORDERS` (Cron Meli Orders) + `Meli Process Order Notifications` importaban la misma orden a la
+vez: buscar-y-crear sin lock (el lock existente es por NOTIFICACIÓN) ⇒ 2 mercadolibre.orders + 2 shipments + contacto
+doble + 2 sale.order (prod 431: 7 ventas en octubre). Fix `models/import_lock.py`: `pg_try_advisory_xact_lock` por
+pack_id y order_id (try, sin espera) + chequeo de snapshot vencido (REPEATABLE READ; cursor nuevo) ⇒ skip
+`MELI_IMPORT_PARALLEL`; guard en `orders_update_order_json` y `fetch_shipment`; create de la orden en savepoint
+(UniqueViolation ⇒ skip). Tests: `test_431_import_lock` (meli_431_lock) + `shell_import_race_same_order.py`.
+
+## 22 oct 2026 — cancelaciones ML por motivo A-F [#624] (v19.0.26.283)
+#624 ROEN: `cancel_detail.code` no separa B/F ni D/E; los separa `payments[].status_detail` (bpp_covered = ML pagó la venta), medido sobre 16 cancelaciones reales etiquetadas por la clienta. `cancel_decision.classify_cancel_reason` (pura) + `sale.order._meli_cancel_by_reason` (opt-in `meli_oerp.cancel_reason_policy=by_reason`, sólo legacy); `meli_cancel_covered`, `meli_cancel_review_scheduled`; mediación: devolución sin validar DESPUÉS de cancelar (`_meli_cancel_after_legacy`, `meli_return_mode_force`); FULL con `meli_oerp.cancel_return_full=1`; pack_splitted nombra la gemela (`_meli_pack_splitted_twins`). Tests `tests/test_26278_cancel_por_motivo.py` (tag meli_26278) + tabla pura: fix verde en 16-19, control origin rojo. Regresión 19: 0 nuevas (4 FAIL preexistentes en accounting TestCancelPorEstadoML p01/p02/p10/p14).
+
+## 20 oct 2026 — #513 TYL: la sincronización devolvía a la original la dirección cambiada a mano (v19.0.26.282)
+**Síntoma:** el usuario cambia a mano la dirección de FACTURA o de ENTREGA de un pedido de ML y la siguiente
+sincronización de la orden (cron o notificación) la vuelve a la original. Igual con la calle / ciudad / teléfono del
+CONTACTO de entrega editado a mano. Único escape: `sale.order.meli_update_forbidden`, que corta TODO lo que viene de ML.
+**Causa:** `orders_update_order_json` y el bloque de packs de `shipment.py` comparaban el contacto del pedido con el
+resuelto desde ML y lo reescribían si difería, sin distinguir quién lo había puesto. `_update_sale_order_shipping_info`
+pisaba street/street2/city/phone del contacto de entrega; `partner_delivery_id` hacía `write` si difería. Además en 15+
+partner_invoice_id / partner_shipping_id son compute sobre partner_id: si el conector escribía partner_id, Odoo los recalculaba.
+**Fix:** el pedido guarda el último contacto que puso el CONECTOR (`meli_partner_invoice_auto_id`,
+`meli_partner_shipping_auto_id`; se registran al crear). En un pedido existente el conector cambia el contacto sólo si
+está vacío o si sigue siendo el que puso él; si es otro, se respeta (log `MELI #513`), y si el conector escribe partner_id se
+re-manda el valor actual. Pedidos anteriores (sin registro): sólo el valor por defecto (el propio cliente) se toma como del
+conector. Contacto de entrega (type=delivery): `res.partner.meli_address_sync_hash` = huella de la última dirección que escribió
+el conector; si no coincide, se editó a mano y no se pisa (sin huella = comportamiento previo, y se registra). Con la entrega
+fijada a mano tampoco se busca / crea contacto de entrega nuevo. La posición fiscal sale de la factura que queda en el pedido.
+Lógica pura: `models/address_lock.py`. Sin opción de configuración: un cambio de dirección hecho en ML sigue entrando si nadie
+tocó el pedido; `meli_update_forbidden` sigue igual.
+**Prueba:** `tests/test_address_lock_pure.py` 20/20; harness (ast) sobre `_meli_merge_ml_addresses` / `_meli_address_locked`
+con registros simulados, 11 casos (nuevo, 513 entrega y factura manual, manual + partner_id, cambio en ML, legado, contacto
+editado, vacío) en 16/17/18/19. **No probado en un Odoo real ni contra un pedido de ML** — pendiente antes del pase.
+**No cubre:** cambios manuales hechos ANTES de instalar 26.282 en un pedido que todavía tiene la dirección por defecto, ni
+contactos de entrega editados antes de 26.282 (sin huella): la primera sincronización posterior todavía los pisa.
+
+## 22 oct 2026 — ventas ML: adopción de línea sin vínculo, carrito de una orden y carrito parcial [#431] (v19.0.26.271)
+#431 duplicados: `orders.py`/`shipment.py` adoptan la línea sin `meli_order_item_id` del mismo producto antes de crear; `_meli_pack_sync_cancelled` acepta carrito de 1 orden; `meli_cancel_with_detail` retiene mientras quede orden vigente. Tests `tests/test_adopcion_linea.py` (tag meli_26250): fix 9/9 en 16-19, control origin 26.270 5F+2E. Origen: ramas claude/431-adopcion-linea-<v> (26.250).
+
+## 22 oct 2026 — release de flota 26.267 (v19.0.26.267)
+267 = release flota: 265 #525 + 266 #539 + 267 #526. meli_oerp no cambia código respecto de 26.265 (los fixes de 266/267 viven en
+meli_oerp_multiple y meli_oerp_accounting); se sube el build para que el suite quede en un único número.
+
+## 22 oct 2026 — #542 SteelTigers API 661 / portal #662: 3 correcciones genéricas de contactos (v19.0.26.264)
+**Origen:** ZIP de IAV Tech (Pablo) con lógica de SteelTigers metida en `orders.py`/`shipment.py`. Se tomó SÓLO lo genérico,
+reescrito; lo de SteelTigers vive en su módulo `steeltiger_meli_contacts` (herencia, sin hook en el core).
+**Fix (`orders_update_order_json`):**
+1. Orden NUEVA: el `mercadolibre.buyers` se crea antes que la orden y el `if order and buyer_id` no la vinculaba ⇒
+   `buyer_id` se inicializa siempre y se escribe `order.buyer` tras crear la orden.
+2. Re-fetch de la orden (llega sin datos del comprador): `data['order_json'] = order_json`, para que los módulos que
+   post-procesan después de `super()` lean el JSON que usó la importación.
+3. `'CONSUMIDOR FINAL': 5` en el mapa AFIP: CF informado por ML pasa a ser dato fiscal EXPLÍCITO (corrige una condición
+   previa del contacto; antes caía al default 5 como implícito y FISCAL_PROTECT no lo escribía).
+**Prueba:** `tests/test_542_661_generico.py` (tag `meli_542_661`). Banco 19 y 17: fix 3/3, control origin 3 FAIL.
+16/18: py_compile, mismo delta.
+## 21 oct 2026 — #611 ROEN 525: «REACTIVADA» cada 30 min sobre publicaciones que seguían pausadas (v19.0.26.257)
+**Síntoma:** >290 «✅ REACTIVADA» en 7 días sobre las mismas (PMG9378 MLM903579818, PMG8009 MLM857540231, PMG5630_10 MLM2472247546), todas con existencia sólo en MLF (Full) y 0 en WH.
+**Causa:** `meli_stock_diagnostic` suma por SQL `stock_quant` de TODAS las ubicaciones internas (Full incluida); el push publica `_meli_available_quantity` de las ubicaciones de la configuración ⇒ publica 0, ML la deja pausada; y «REACTIVADA» se anotaba sin releer el estado (`product_meli_status_active` devuelve {} siempre).
+**Fix:** `_meli_diag_publishable_qty` (misma función que el push, config de la cuenta del binding, tipo logístico de la respuesta ya leída vía `meli_logistic_type_hint`): si es 0 ⇒ no reactiva (queda en el detalle). `_meli_diag_status_after_activate`: GET de verificación; «REACTIVADA» sólo si `active`, si no «NO QUEDÓ ACTIVA» (warning) o «ACTIVACIÓN SIN VERIFICAR».
+**Prueba:** `tests/test_525_stock_diag_full.py` (tag meli_525, 3 casos). Banco 19 y 17: fix 3/3; control origin 2 FAIL + el control positivo OK.
+**Costo:** +1 GET por reactivación intentada (las inútiles ya no se intentan).
+## 21 oct 2026 — #615 ROEN: el enlace del reclamo no abría la mediación (v19.0.26.259)
+**Síntoma:** desde el reclamo, el enlace llevaba a la venta y no a la mediación; la cliente pasó el formato correcto (`vendedores.…/ventas/nueva/mensajeria/<pack>/mediacion/<claim>`).
+**Causa:** `mercadolibre.claim.compute_claim_link` armaba `www.<dominio>/reclamos/<claim_id>`. El fix de 26.133 (dc6f4b47) sólo había corregido el link de mensajería de la orden.
+**Fix:** `_meli_claim_ref` (pack de la orden > orden > `resource_id` si `resource='order'`) y, **sólo para `type='mediations'`**, el link del panel del vendedor. Otros tipos o sin referencia ⇒ link anterior (no hay formato confirmado para returns/cancel_*). Dominio con la compañía del reclamo.
+**Prueba:** `tests/test_525_claim_link.py` (tag `meli_525`), caso real claim 5597226476 / pack 2000015578976049: banco 17 y 19 con fix 4/4; control origin 3 FAIL + 1 OK (control: tipos no mediación sin cambio). 16/18 py_compile.
+
 ## 19 oct 2026 — #543 Petswagon: SKU de ML «código-descripción» no vinculaba (v19.0.26.246)
 **Síntoma:** SKU en ML `21342-VITAL PREMIUM PERRO ADULTO 20K`, Referencia interna `21342`: el wizard de importación masiva no vinculaba nada y el binding de variante abortaba («Aborting binding product (using Only SKU: NO SKU)»).
 **Causa:** todo el matching del suite es exacto (`default_code =ilike sku`).
 **Fix:** opción `mercadolibre_sku_token_match` (+ `_separators`), default apagada, como RESPALDO después del exacto. Helper único: `models/sku_token.py` (regla pura) + `product.product._meli_sku_token_resolve/_matches` (ORM; apagada ⇒ 0 queries). Puntos: `company.product_meli_get_products` (ítem y variación), `mercadolibre.orders.search_meli_product` y 2.º intento de `orders_update_order_json`.
 **Prueba:** banco Odoo 16, 17, 18 y 19 (PG privado, shell ORM 39/39 en CADA serie): test puro contra la lista medida de 543 (1338 filas, 0 discrepancias: 586 activas/415 pausadas resuelven) + shell ORM 39/39 (único, sin match, ambiguo de tokens, código duplicado, comodín `_` escapado, otra compañía, separador custom, opción apagada ⇒ resultados de hoy y 0 queries, `bind_to` real: apagada no crea binding de variante, encendida sí).
+### 6 oct 2026 — Precisión "Product Price" a 6 dígitos ahora es opcional [#542 SteelTiger / #659] (v19.0.26.193)
+
+`__init__.py` `post_init_hook`: forzaba 'Product Price' a 6 dígitos al instalar. Ahora lee el parámetro de sistema
+`meli_oerp.product_price_digits`: ausente/vacío ⇒ 6 (como antes); `0`/`false`/`no`/`off`/`keep` ⇒ no toca; entero
+1..10 ⇒ sube hasta ese valor. Nunca BAJA una precisión ya configurada. El hook corre sólo al INSTALAR (no en `-u`),
+así que las instalaciones existentes no cambian; un cliente que ya tiene 6 y quiere 2 la baja a mano en
+Ajustes > Técnico > Precisión decimal (nada del módulo la vuelve a subir). Mismo hook en 16/17/18: port pendiente.
+Rama `claude/542-get-meli-state-multicompania`, SIN merge/deploy.
+## 19.0.26.225 — 14-oct-2026 · #662 SteelTigers (542)
+- **URLs por `meli_api_url`:** el token (`oauth/token`, `authorize`/`get_refresh_token`), las etiquetas (`shipment._meli_label_url`/`_meli_label_fetch_vals` y `/meli/shipment_labels`) salen por el host efectivo de la instancia y por su sesión (rastro del host alternativo). Helpers nuevos en `meli_util`: `meli_instance_api_host`, `meli_instance_url`, `meli_instance_session`. `TOKEN_URL` fijo reemplazado por `TOKEN_PATH`.
+- **`USE_MELI_SDK` / `MELI_SDK_AVAILABLE` fijos en False** y sin `import meli` (`versions.py`).
+- **Landeo de 26.193** (rama `claude/542-get-meli-state-multicompania`, cherry-pick): `post_init_hook` de `Product Price` opcional por `meli_oerp.product_price_digits`.
+## 15 oct 2026 — ventas ML: cupón del vendedor, envío del comprador, cupón+descuento, pack cancelado, línea en venta confirmada (v19.0.26.229)
+**1. Cupón a cargo del vendedor.** Síntoma: venta a precio lleno, factura sin el descuento. Causa: `orders_update_order_json`
+preciaba la línea con `self._set_product_unit_price` y en el import de una orden NUEVA `self` es el recordset vacío
+(⇒ `discount_seller_amount`=0); el re-sync sí descontaba pero la venta ya estaba confirmada. Fix: `order._set_product_unit_price`
+con prorrateo por ítem (`items_total`); `/discounts` también si `payments[].coupon_amount`>0; campo
+`mercadolibre.orders.discount_seller_coupon_amount` (type=coupon) y los modos product_discount/separate_line usan sólo la parte ML.
+**2. Envío del comprador.** `sale.order.meli_shipping_amount` sólo lo escribía `fetch_shipment` en un camino. Fix: fallback
+`payments[].shipping_cost`; red final en el import (venta de una orden); lectura `_meli_so_buyer_shipping()` (venta o pagos).
+**3. Cupón + descuento del vendedor.** `meli_amount_to_invoice` restaba del pago un descuento ya restado en la línea (topado por
+el cupón). Fix: wrapper sobre `_meli_amount_to_invoice_legacy`; si la venta prueba el descuento en la línea
+(`amount_total == meli_total_amount − desc`) y el legacy no cuadra ⇒ interpretación exacta sin descuento (pagado − s,
+s ∈ {0, envío del comprador}, tolerancia 1,0; autocontenido: esta serie no tiene el modo `never_below_total` de #504).
+**4. Pack cancelado.** `_meli_pack_sync_cancelled()` antes de `confirm_ml`: todas las órdenes canceladas ⇒ `meli_status`
+cancelled + motivo/fecha.
+**5. Línea en venta confirmada.** Guard de estado (sale/done/locked) antes de crear líneas en orders.py y shipment.py (packs);
+respaldo de búsqueda por ítem sin variación.
+**Tests:** `tests/test_ventas_ml_cupon_envio.py`, `tests/test_import_cupon_linea.py` (tag meli_26229); el control sobre el código
+anterior se midió en 18.0 (falla en los 5 frentes).
 
 ## 13 oct 2026 — #638 T3LC: la cancelación automática devolvía stock con CUALQUIER motivo (v19.0.26.221)
 **Síntoma:** el barrido rotativo de estados (#638, 26.218) cancelaba y **devolvía** (IN validado) las ventas canceladas

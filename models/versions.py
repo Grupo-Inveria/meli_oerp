@@ -155,7 +155,7 @@ def meli_message_body_with_marker(body, once_key):
     return markup_escape(body) + Markup(meli_once_marker(once_key))
 
 
-def meli_message_post(record, body, config=None, once_key=None):
+def meli_message_post(record, body, config=None, once_key=None, force_chatter=False):
     """Post a message respecting the MeLi notification mode setting.
 
     config: res.company or connection_account record with mercadolibre_notification_mode field.
@@ -182,6 +182,11 @@ def meli_message_post(record, body, config=None, once_key=None):
     if config and 'mercadolibre_notification_mode' in config._fields:
         mode = config.mercadolibre_notification_mode or 'notification'
 
+    if mode == 'none' and force_chatter:
+        # [26.270] Aviso de DINERO BLOQUEADO (cobro/pago que no se registro): el modo 'none'
+        # existe para bajar ruido, no para esconder plata sin registrar. Va como nota interna
+        # (sin inbox), una vez por pago (once_key).
+        mode = 'internal_note'
     if mode == 'none':
         _logger.info("MELI [%s] %s: %s", record._name, getattr(record, 'name', record.id), body)
         return
@@ -254,19 +259,10 @@ mercadolibre_shipment_print_guide_mode = "pdf"
 #   versions.USE_MELI_SDK = True   # forzar SDK
 #   versions.USE_MELI_SDK = False  # forzar requests
 # ---------------------------------------------------------------------------
+# el SDK oficial NO se usa. Fijo en False y sin `import meli`:
+# todas las llamadas salen por requests (MeliApiNoSDK) y por el host de meli_api_url.
 MELI_SDK_AVAILABLE = False
-try:
-    import meli as _meli_sdk_probe
-    MELI_SDK_AVAILABLE = True
-    _logger.info("meli SDK disponible")
-except ImportError:
-    _logger.info("meli SDK no disponible - Usando requests directo")
-
-# Por defecto: usar SDK solo si está instalado
-USE_MELI_SDK = MELI_SDK_AVAILABLE
-
-#forzar NO SDK: comentar siguiente linea
-#USE_MELI_SDK = False
+USE_MELI_SDK = False
 
 # Detectar si unidecode está disponible
 UNIDECODE_AVAILABLE = False
@@ -579,7 +575,7 @@ def template_image_ids(self):
         return _meli_only_pictures(self.product_template_image_ids)
     return None
 
-# [#542] Un product.image con `video_url` es un VIDEO de la multimedia del producto: su imagen es
+# [un caso] Un product.image con `video_url` es un VIDEO de la multimedia del producto: su imagen es
 # la miniatura de YouTube/Vimeo. No se sube como foto a ML (aparecería una miniatura de video entre
 # las fotos de la publicación). ML tampoco acepta hoy el video de YouTube (`video_id` se descarta).
 def _meli_only_pictures(images):
@@ -677,21 +673,49 @@ def ml_datetime(datestr):
         return None
 
 def ml_tax_excluded(self, config=None ):
-    #11.0
-    #tax_excluded = self.env.user.has_group('sale.group_show_price_subtotal')
-    #12.0 and 13.0
-    tax_excluded = self.env.user.has_group('account.group_show_line_subtotals_tax_excluded')
+    """True = el precio de lista de Odoo es NETO (al publicar se suma el IVA; al importar se netea).
 
+    [529/543] (19-oct-2026) `auto` ("Configuracion del sistema") se resolvia con el grupo
+    account.group_show_line_subtotals_tax_excluded, que existe SOLO hasta Odoo 16 (17 lo movio a
+    website_sale; 18/19 usan res.company.account_price_include). En 17+ has_group() de un xmlid
+    inexistente da False, asi que `auto` ya era "lista con impuestos incluidos" para publicar e
+    importar precios. Se deja EXPLICITO y sin depender de un xmlid que no existe; NO se cambia el
+    significado: este flag gobierna el precio PUBLICADO (price_list_apply_tax=True) y atarlo a
+    account_price_include (default 'tax_excluded') subiria x1,21 lo publicado de todo cliente 17+
+    con `auto`. Las ORDENES no dependen de esto: ver ml_product_price_conversion [#486].
+    """
     company = (config and "company_id" in config._fields and config.company_id) or self.env.user.company_id
     config = config or company
     if (config and config.mercadolibre_tax_included not in ['auto']):
-        tax_excluded = (config.mercadolibre_tax_included in ['tax_excluded'])
-    return tax_excluded
+        return (config.mercadolibre_tax_included in ['tax_excluded'])
+    #11.0: 'sale.group_show_price_subtotal' / 12.0 a 16.0: el grupo de abajo / 17.0+: no existe
+    if self.env.ref('account.group_show_line_subtotals_tax_excluded', raise_if_not_found=False):
+        return self.env.user.has_group('account.group_show_line_subtotals_tax_excluded')
+    return False
+
+def ml_sale_tax_rates(taxes, company=None):
+    """(porcentaje, fijo) de los impuestos de VENTA no incluidos en precio, SOLO de `company`.
+
+    [543] (19-oct-2026) Un producto compartido entre compañias lleva en taxes_id el IVA de CADA
+    una: sumarlos todos dividia/multiplicaba por 1,42 en vez de 1,21 con dos compañias. Sin
+    compañia (llamador viejo) se suman todos, como antes.
+    """
+    txpercent = 0.0
+    txfixed = 0.0
+    for txid in (taxes or []):
+        if company and txid.company_id and txid.company_id != company:
+            continue
+        if (txid.type_tax_use == "sale" and not txid.price_include):
+            if (txid.amount_type == "percent"):
+                txpercent = txpercent + txid.amount
+            if (txid.amount_type == "fixed"):
+                txfixed = txfixed + txid.amount
+    return txpercent, txfixed
 
 def ml_product_price_conversion( self, product_related_obj, price, config=None):
     """Importe que COBRA ML (unitario de una orden, o flete) -> price_unit de la linea de venta.
 
-    [#486 Enerpoint] El precio de una venta de ML es SIEMPRE final, con impuestos incluidos.
+    [caso de un cliente] El precio de una venta de ML es SIEMPRE final, con impuestos incluidos.
     Por eso se netea siempre por los impuestos de venta NO incluidos del producto (los
     `price_include` ya lo absorben solos), de modo que total Odoo == lo cobrado en ML.
 
@@ -705,7 +729,7 @@ def ml_product_price_conversion( self, product_related_obj, price, config=None):
     company_id = ("company_id" in config._fields and config.company_id) or config
     product_template = product_related_obj.product_tmpl_id
     ml_price_converted = float(price)
-    # Sin depender de ml_tax_excluded(): ver docstring [#486].
+    # Sin depender de ml_tax_excluded(): ver docstring [un caso].
     #_logger.info("Taxes:"+str(product_template.taxes_id))
     if ( product_template.taxes_id ):
         txfixed = 0
@@ -748,7 +772,7 @@ def meli_resolve_coupon_invoice_mode(config):
     """Modo de facturacion del cupon ML (tri-estado). Devuelve 'full'|'product_discount'|'separate_line'.
 
       - full (default): factura a precio pleno; el cupon ML (reembolsado por ML, vendedor
-        made-whole) NO se refleja en lineas. [caso #433 Elvimarta]
+        made-whole) NO se refleja en lineas. [caso un cliente]
       - product_discount: el cupon se imputa como descuento (%) sobre las lineas de PRODUCTO.
       - separate_line: el cupon se imputa como linea(s) de descuento separada(s), una por grupo
         de impuesto (prorrateo), sin tocar producto ni envio. OPT-IN (riesgos AFIP/CL).
@@ -861,7 +885,7 @@ def meli_apply_coupon_separate_line(sorder, coupon_amount):
 def meli_sync_draft_invoice_discounts(sorder):
     """Lleva el descuento (%) de las lineas de la venta a su(s) factura(s) en BORRADOR.
 
-    [529 UniversoPets, venta ML 2000018699117140] ML puede actualizar el cupon DESPUES de que
+    [un cliente, venta ML <order_id>] ML puede actualizar el cupon DESPUES de que
     la factura borrador ya se creo (7000 -> 9352,75, 46 s despues). El bloque del cupon recalcula
     line.discount en la venta, pero la factura borrador quedaba con el % viejo y se posteaba con
     el importe anterior (saldo contra el cobro). Solo toca facturas en estado 'draft' (sin CAE ni
@@ -913,7 +937,7 @@ def get_delivery_line(sorder):
 def _meli_guard_delivery_write(sorder, delivery_line, delivery_price):
     """True -> NO se debe escribir la linea de envio (la venta ya tiene factura posteada).
 
-    [#493 Shoppy] El guard estaba SOLO dentro de set_delivery_line, con un comentario que
+    [caso de un cliente] El guard estaba SOLO dentro de set_delivery_line, con un comentario que
     afirmaba que ese era "el unico lugar por el que pasan TODAS las reescrituras de la
     linea de envio". No era cierto: shipment.py escribe `price_unit`/`qty_to_invoice`
     DIRECTO sobre la linea, y `_remove_delivery_line()` la borra entera. Por esos caminos
@@ -955,13 +979,13 @@ def set_delivery_line( sorder, delivery_price, delivery_message ):
          deshace el borrado en vez de dejar la venta pelada;
       3) los fallos se loguean con la venta y el error reales.
 
-    Caso que lo destapo (Elvimarta, jul-2026): 47 ordenes quedaron sin flete en 7 semanas y
+    Caso que lo destapo (un cliente, jul-2026): 47 ordenes quedaron sin flete en 7 semanas y
     20 se facturaron por debajo de lo cobrado al comprador.
     """
     #check version
     delivery_line = get_delivery_line(sorder)
 
-    # [#493 Shoppy] No tocar ventas YA FACTURADAS. Este es el punto por el que el
+    # [caso de un cliente] No tocar ventas YA FACTURADAS. Este es el punto por el que el
     # conector dejaba el flete en 0 sobre ventas con factura posteada, y la venta
     # quedaba por debajo de su propia factura.
     if _meli_guard_delivery_write(sorder, delivery_line, delivery_price):
@@ -1032,3 +1056,80 @@ def tax_names_equivalent(name1: str, name2: str) -> bool:
         return False
     # reconocemos equivalencia si las tasas son iguales
     return r1 == r2
+
+
+# ---------------------------------------------------------------------------
+# [26.269] Linea de metodo de pago EXPLICITA para los cobros/pagos de ML.
+#
+# El modulo creaba el account.payment con journal_id + payment_method_id pero sin
+# payment_method_line_id, asi que Odoo elegia la linea solo: en 18/19 la preferida
+# del partner y si no la PRIMERA linea del diario; en 16/17 la primera. La "Cuenta
+# de pagos pendientes" del cobro sale de esa linea (payment_account_id). En 18/19 no
+# hay default de compania: si la primera linea es "Online"/"En linea" sin cuenta, el
+# cobro queda SIN ASIENTO (visto en un cliente: los 3 diarios de cobro tenian "Online"
+# sin cuenta). En 16/17 la linea sin cuenta cae al default de la compania
+# (account_journal_payment_debit/credit_account_id) y en 18/19 Community Odoo pone la
+# cuenta pendiente del plan: esos defaults se respetan. El caso roto es 18/19 con
+# account_accountant (Enterprise / Odoo.sh), donde no hay default.
+#
+# Regla: si la linea que Odoo elegiria sola es valida, se usa ESA (sin cambio de
+# comportamiento). Si no, la primera linea del diario que si tenga cuenta. Si
+# ninguna es valida, devuelve una linea vacia + el motivo, y el que llama NO crea
+# el pago (un pago sin asiento es peor que un pago que falta y avisa).
+# ---------------------------------------------------------------------------
+def meli_payment_method_line_for(journal, payment_type='inbound', partner=None):
+    """Devuelve (account.payment.method.line, motivo). motivo == '' si hay linea valida."""
+    from odoo import release
+    env = journal.env
+    Line = env['account.payment.method.line']
+    if not journal:
+        return Line, "no hay diario de pagos configurado"
+    journal = journal[:1]
+    lines = journal._get_available_payment_method_lines(payment_type)
+    company = journal.company_id
+    default_field = ('account_journal_payment_debit_account_id' if payment_type == 'inbound'
+                     else 'account_journal_payment_credit_account_id')
+    company_default = default_field in company._fields and company[default_field]
+    if not company_default and release.version_info[0] >= 18:
+        # 18/19 SIN contabilidad completa (Community: _get_invoice_in_payment_state != 'in_payment'):
+        # al crear el pago Odoo le pone la cuenta pendiente del plan si la linea no tiene
+        # (account.payment.create -> _get_outstanding_account). Ese default se respeta. Con
+        # account_accountant (Enterprise / Odoo.sh) no hay default: linea sin cuenta = sin asiento.
+        Move = env['account.move']
+        if hasattr(Move, '_get_invoice_in_payment_state') and Move._get_invoice_in_payment_state() != 'in_payment':
+            company_default = True
+
+    def _valid(line):
+        return bool(line and (line.payment_account_id or company_default))
+
+    # Lo que Odoo elegiria solo (ver account.payment._compute_payment_method_line_id).
+    odoo_pick = Line
+    if partner and release.version_info[0] >= 18:
+        pref_field = ('property_inbound_payment_method_line_id' if payment_type == 'inbound'
+                      else 'property_outbound_payment_method_line_id')
+        if pref_field in partner._fields:
+            pref = partner.with_company(company)[pref_field]
+            if pref and pref.id in lines.ids:
+                odoo_pick = pref
+    odoo_pick = odoo_pick or lines[:1]
+    if _valid(odoo_pick):
+        return odoo_pick, ''
+    for line in lines:
+        if _valid(line):
+            _logger.info("MELI payment method line: diario %s, la linea por defecto '%s' no tiene "
+                         "cuenta de pagos pendientes; se usa '%s'.",
+                         journal.display_name, odoo_pick.name, line.name)
+            return line, ''
+    tipo = 'entrante' if payment_type == 'inbound' else 'saliente'
+    return Line, ("el diario '%s' no tiene ningun metodo de pago %s con 'Cuenta de pagos pendientes' "
+                  "configurada (Contabilidad > Configuracion > Diarios > %s > pestana de pagos). "
+                  "Sin esa cuenta el pago quedaria sin asiento." % (journal.display_name, tipo, journal.display_name))
+
+
+def meli_money_block_post(record, body, config=None, once_key=None):
+    """[26.270] Aviso de cobro/pago NO registrado: siempre queda en el chatter (nota interna si el
+    modo de notificaciones es 'none'). Si el registro no tiene chatter, queda en el log."""
+    _logger.warning("MELI dinero sin registrar [%s %s]: %s", record and record._name,
+                    record and record.ids, body)
+    if record and hasattr(record, 'message_post'):
+        meli_message_post(record, body, config=config, once_key=once_key, force_chatter=True)
