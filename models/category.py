@@ -118,7 +118,7 @@ class product_public_category(models.Model):
 
     _inherit="product.public.category"
 
-    mercadolibre_category = fields.Many2one( "mercadolibre.category", string="Mercado Libre Category")
+    mercadolibre_category = fields.Many2one( "mercadolibre.category", string="Mercado Libre Category", index='btree_not_null')
 
 
 class mercadolibre_category_attribute(models.Model):
@@ -437,6 +437,11 @@ class mercadolibre_category(models.Model):
         meli = self.get_meli(meli=meli)
 
         for category in self:
+            # Los dos campos computados por este método se asignan siempre: sin esto, una categoría
+            # nueva (form en blanco) o una raíz (path_from_root < 2) rompe con "Compute method failed
+            # to assign" (visto en el smoke de UI de 20.0; el mismo código está en 16–19).
+            category.meli_category_url = False
+            category.meli_father_category_id = False
             if (category and category.meli_category_id):
                 #_logger.info("_get_category_url:"+str(category.meli_category_id))
                 response_cat = meli.get("/categories/"+str(category.meli_category_id), {'access_token':meli.access_token})
@@ -468,6 +473,8 @@ class mercadolibre_category(models.Model):
         meli = self.get_meli(meli=meli)
 
         for category in self:
+            # Igual que en _get_category_url: el computado se asigna siempre (categoría nueva / rama).
+            category.meli_category_attributes = False
             if (category.meli_category_id
                 and category.is_branch==False
                 and ( 1==1 or category.meli_category_attribute_ids==None or len(category.meli_category_attribute_ids)==0 )):
@@ -941,7 +948,7 @@ class mercadolibre_grid_value(models.Model):
     meli_id = fields.Char(string="Id",required=True,index=True)
     name = fields.Char(string="Nombre",index=True)
     value = fields.Char(string="Value",index=True)
-    att_id = fields.Many2one("mercadolibre.grid.attribute", string="Attribute")
+    att_id = fields.Many2one("mercadolibre.grid.attribute", string="Attribute", index='btree_not_null')
 
 
     def prepare_vals( self, djson ):
@@ -968,7 +975,7 @@ class mercadolibre_grid_attribute_line(models.Model):
     _name = "mercadolibre.grid.attribute.line"
     _description = "Linea de atributo de Guia de talles de MercadoLibre"
 
-    grid_chart_id = fields.Many2one("mercadolibre.grid.chart", string="row id")
+    grid_chart_id = fields.Many2one("mercadolibre.grid.chart", string="row id", index='btree_not_null')
     att_id = fields.Many2one("mercadolibre.grid.attribute", string="Attribute")
     val_id = fields.Many2one("mercadolibre.grid.value", string="Values")
 
@@ -984,7 +991,7 @@ class mercadolibre_grid_row_col(models.Model):
     _name = "mercadolibre.grid.row.col"
     _description = "Col de atributo de Guia de talles de MercadoLibre"
 
-    grid_row_id = fields.Many2one("mercadolibre.grid.row", string="Row id")
+    grid_row_id = fields.Many2one("mercadolibre.grid.row", string="Row id", index='btree_not_null')
     #att_id = fields.Many2one("mercadolibre.grid.attribute", string="Attribute")
     #val_id = fields.Many2one("mercadolibre.grid.value", string="Values")
     att_id = fields.Char(string="Id",required=True,index=True)
@@ -992,19 +999,6 @@ class mercadolibre_grid_row_col(models.Model):
     value = fields.Char(string="Value",required=True,index=True)
     number = fields.Char(string="Number",required=False,index=True)
     unit = fields.Char(string="Unit",required=False,index=True)
-
-    def name_get(self):
-        """Override because in general the name of the value is confusing if it
-        is displayed without the name of the corresponding attribute.
-        Eg. on product list & kanban views, on BOM form view
-
-        However during variant set up (on the product template form) the name of
-        the attribute is already on each line so there is no need to repeat it
-        on every value.
-        """
-        #if not self._context.get('show_attribute', True):
-        #    return super(mercadolibre_grid_row_col, self).name_get()
-        return [(col.att_id, "%s: %s" % (col.name, col.value)) for col in self]
 
     def prepare_vals( self, djson ):
 
@@ -1032,7 +1026,7 @@ class mercadolibre_grid_row(models.Model):
     _description = "Fila de guia de talles de MercadoLibre"
 
     row_id = fields.Char(string="Id",required=True,index=True)
-    grid_chart_id = fields.Many2one("mercadolibre.grid.chart", string="Chart id")
+    grid_chart_id = fields.Many2one("mercadolibre.grid.chart", string="Chart id", index='btree_not_null')
     attribute_values = fields.One2many("mercadolibre.grid.row.col", "grid_row_id", string="Attributes Values")
 
     def prepare_vals( self, djson ):

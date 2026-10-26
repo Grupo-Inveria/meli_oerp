@@ -428,7 +428,7 @@ class mercadolibre_shipment_item(models.Model):
     _name = "mercadolibre.shipment.item"
     _description = "Item de Envio de MercadoLibre"
 
-    shipment_id = fields.Many2one("mercadolibre.shipment",string="Shipment")
+    shipment_id = fields.Many2one("mercadolibre.shipment",string="Shipment", index='btree_not_null')
     name = fields.Char(string='Name', index=True)
     description = fields.Char(string="Description", index=True)
     item_id = fields.Char(string="Item Id (meli id)", index=True)
@@ -448,7 +448,7 @@ class mercadolibre_shipment(models.Model):
     posting_id = fields.Many2one("mercadolibre.posting",string="Posting")
     shipping_id = fields.Char(string='Envio Id',index=True)
     order_id = fields.Char(string='Order Id',index=True)
-    order = fields.Many2one("mercadolibre.orders",string="Order")
+    order = fields.Many2one("mercadolibre.orders",string="Order", index='btree_not_null')
     orders = fields.Many2many("mercadolibre.orders",string="Orders (carrito)")
     shipment_items = fields.One2many("mercadolibre.shipment.item","shipment_id",string="Items")
     sale_order = fields.Many2one('sale.order',string="Sale Order",help="Pedido de venta relacionado en Odoo")
@@ -816,8 +816,8 @@ class mercadolibre_shipment(models.Model):
             including_shipping_cost = including_shipping_cost or "always"
 
             if (sorder and sorder.meli_update_forbidden):
-                _logger.error("Forbidden to update sale order by meli_oerp" )
-                return {'error': 'Forbidden to update sale order by meli_oerp' }
+                meli_log_update_forbidden(_logger, sorder, " (envio)")  # 26.309 (158): WARNING una vez
+                return {'error': 'Forbidden to update sale order by meli_oerp', 'meli_update_forbidden': True}
 
             sorder.meli_shipping_cost = shipment.shipping_cost
             #sorder.meli_shipping_seller_cost = shipment.shipping_seller_cost
@@ -1179,58 +1179,17 @@ class mercadolibre_shipment(models.Model):
                     # picking is done — but for MeLi we invoice on payment, not on delivery.
                     delivery_line = get_delivery_line(sorder)
                     if delivery_line and delivery_line.state not in ('cancel',):
-                        # [26.231] lo que FALTA facturar, no la cantidad pedida: despues
-                        # de facturar el envio volver a escribir 1 lo dejaba "A facturar".
-                        _expected_qty = max((delivery_line.product_uom_qty or 1.0)
-                                            - (delivery_line.qty_invoiced or 0.0), 0.0)
-                        if delivery_line.qty_to_invoice != _expected_qty:
-                            try:
-                                delivery_line.qty_to_invoice = _expected_qty
-                                _logger.info(
-                                    "MELI shipment: restored qty_to_invoice=%.2f on delivery line "
-                                    "for SO %s (price=%.2f, product=%s)",
-                                    _expected_qty, sorder.name, delivery_price,
-                                    delivery_line.product_id.default_code or delivery_line.product_id.name,
-                                )
-                            except Exception as _e:
-                                _logger.warning(
-                                    "MELI shipment: could not restore qty_to_invoice for SO %s: %s",
-                                    sorder.name, _e,
-                                )
+                        # [158, 26.307] ya no se escribe qty_to_invoice a mano: si el guard de venta
+                        # facturada freno el precio, la linea seguia en $0 y quedaba "A facturar".
+                        try:
+                            delivery_line._meli_refresh_shipping_invoice_qty()
+                        except Exception as _e:
+                            _logger.warning(
+                                "MELI shipment: could not refresh qty_to_invoice for SO %s: %s",
+                                sorder.name, _e,
+                            )
                 #_logger.info("Finished _update_sale_order_shipping_info")
             return
-
-
-
-            #REMOVE OLD SALE ORDER ITEM SHIPPING ITEM
-            saleorderline_item_fields = {
-                'company_id': company.id,
-                'order_id': sorder.id,
-                'meli_order_item_id': 'ENVIO',
-                'price_unit': delivery_price,
-                'product_id': product_shipping_id.id,
-                'product_uom_qty': 1.0,
-                'name': "Shipping " + str(shipment.shipping_mode),
-            }
-            uom_field = SaleOrderLineUomField( self )
-            saleorderline_item_fields[uom_field] = product_shipping_id.uom_id.id
-            saleorderline_item_ids = saleorderline_obj.search( [('meli_order_item_id','=',saleorderline_item_fields['meli_order_item_id']),
-                                                                ('order_id','=',sorder.id)] )
-
-            if not saleorderline_item_ids and (del_price>0):
-                #saleorderline_item_ids = saleorderline_obj.create( ( saleorderline_item_fields ))
-                pass;
-            else:
-                if (1==2 and del_price>0):
-                    saleorderline_item_ids.write( ( saleorderline_item_fields ) )
-                else:
-                    try:
-                        #_logger.info("removing saleorderline_item_ids")
-                        pass;
-                        #saleorderline_item_ids.unlink()
-                    except:
-                        #_logger.info("Could not unlink.")
-                        pass;
 
     def _get_or_create_delivery_address(self, parent_partner, shipping_vals, create_if_not_found=False):
         Partner = self.env['res.partner']
@@ -1766,10 +1725,10 @@ class mercadolibre_shipment(models.Model):
                 query = """SELECT id
                 FROM   mercadolibre_shipment
                 WHERE
-                shipping_id = '%s'
-                """ % (ship_id)
+                shipping_id = %s
+                """
                 cr = MeliCr( self )
-                respquery = cr.execute(query)
+                respquery = cr.execute(query, (str(ship_id),))
                 results = cr.fetchall()
                 shipment_ids = results
                 shipment = False
@@ -1882,8 +1841,8 @@ class mercadolibre_shipment(models.Model):
                         #sorder_pack = self.env["sale.order"].search( [ '|',('meli_order_id','=',packed_order_ids), ('name','like', str(oname)) ], order="id asc", limit=1 )
                         sorder_pack = self.env["sale.order"].search( [ ('meli_order_id','=',packed_order_ids) ], order="id asc", limit=1 )
                         if (sorder_pack and sorder_pack.meli_update_forbidden):
-                            _logger.error("Forbidden to update sale order by meli_oerp" )
-                            return {'error': 'Forbidden to update sale order by meli_oerp' }
+                            meli_log_update_forbidden(_logger, sorder_pack, " (envio)")  # 26.309 (158): WARNING una vez
+                            return {'error': 'Forbidden to update sale order by meli_oerp', 'meli_update_forbidden': True}
 
                         sorder = sorder_pack
                         totales = {}

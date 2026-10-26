@@ -4,6 +4,28 @@
 
 ---
 
+## 19.0.26.309 — 25-oct-2026 · Ventas marcadas «No actualizar desde ML»: sin errores repetidos en el registro
+- Una venta con «No actualizar desde ML» sigue sin tocarse, pero ya no deja un error en el registro cada vez que llega una novedad de MercadoLibre: se avisa una vez y la notificación se da por procesada.
+
+## 19.0.26.308 — 25-oct-2026 · Etiquetas de la venta en español y limpieza de código compartida con Odoo 20
+- Pestaña MercadoLibre de la venta y lista de órdenes ML con etiquetas en español: monto del cupón (se corrigió el error de tipeo «Coupont amount»), descuento a cargo del vendedor, provincia/localidad/barrio/código postal del comprador, orden, id de envío, producto, SKU, IVA e ids de ML del producto; también monto de envío, detalle del estado y archivo PDF de la etiqueta.
+- Consultas a la base con datos de MercadoLibre como parámetros (no armadas como texto) y 17 índices nuevos en relaciones muy usadas. ⚠️ Al actualizar se crean esos índices: en bases grandes conviene hacerlo fuera del horario de ventas.
+- Crear una categoría ML nueva desde «Categorías» ya no da error.
+- Se eliminó código que nunca se ejecutaba y los tests no salen a internet. En esta versión se quitaron además dos métodos que Odoo ya no llamaba (sin cambio visible).
+- Release de armonización: mismo número 26.308 en 16, 17, 18, 19 y 20 para meli_oerp, meli_oerp_stock, meli_oerp_accounting, meli_oerp_multiple, meli_oerp_autofacturacion, meli_oerp_campaign y odoo_connector_api.
+
+## 19.0.26.307 — 25-oct-2026 · La línea de envío en $0 de una venta ya facturada ya no queda «A facturar» [158]
+- Cuando MercadoLibre informa un costo de envío sobre una venta que ya tiene factura emitida, el envío no se modifica (protección de venta facturada) y ahora tampoco se marca para facturar: la venta sigue «Facturada». Antes la línea de envío en $0 quedaba «A facturar» y un «Crear factura» manual armaba una factura con sólo el envío en $0.
+- Al actualizar, se recalcula el estado de las líneas de envío de ventas ML en $0 que hubieran quedado así. Las líneas de envío con precio no se tocan.
+
+## 19.0.26.306 — 25-oct-2026 · Devolución automática de envíos FULL con el parámetro `meli_oerp.cancel_return_full` [#607]
+- Con el parámetro del sistema `meli_oerp.cancel_return_full = 1`, cuando MercadoLibre cancela una venta FULL con la salida ya hecha, la devolución se crea (y se valida si «Devoluciones» está en «Crear y validar») hacia la ubicación de origen de la salida. Antes sólo funcionaba junto con la política por motivo (`meli_oerp.cancel_reason_policy = by_reason`); ahora vale solo.
+- Sin el parámetro en 1 no cambia nada: las ventas FULL siguen sin devolución automática.
+- Siguen aplicando los motivos de `meli_oerp.cancel_return_reasons`, el pack dividido (`pack_splitted`, nunca devuelve solo en el modo de siempre) y el control de «ya devuelta» (no se duplica).
+
+## 19.0.26.305 — 25-oct-2026 · Release de flota 26.305 (acompaña el cobro automático de meli_oerp_accounting)
+- Test de regresión: re-sincronizar una venta ya facturada no cambia la línea de envío.
+
 ## 19.0.26.302 — 24-oct-2026 · Reserva de stock con Fabricación y dependencias
 - Reserva de stock compatible con Fabricación (mrp): `stock.move._action_assign` acepta y pasa `force_qty` como el core (antes, con mrp instalado, la reserva podía fallar con TypeError).
 - `requirements.txt` sin `Pillow>=12.0.0`: Odoo ya fija su versión de Pillow; forzar otra hacía que Odoo.sh reinstalara una librería del core.

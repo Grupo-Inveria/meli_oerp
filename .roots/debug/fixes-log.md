@@ -4,6 +4,22 @@
 
 ---
 
+## 25 oct 2026 — venta bloqueada (meli_update_forbidden): WARNING una vez + marca en el retorno [158] (v19.0.26.309)
+**Síntoma (158, prod 17.0.26.294):** `Forbidden to upate by meli_oerp` 60-99/h antes del pase, 131-238/h después; eco igual en meli_oerp_multiple connection_notification.
+**Causa:** models/orders.py `orders_update_order_json` (guard `sorder.meli_update_forbidden`): `_logger.error` en cada llamada y un `{'error'}` indistinguible de un fallo ⇒ la notificación queda FAILED y el cron la retoma siempre (ver meli_oerp_multiple). Ídem shipment.py (2 guards "Forbidden to update sale order").
+**Fix:** versions.py `meli_log_update_forbidden` (WARNING 1ra vez por venta y proceso, luego DEBUG) + `meli_is_update_forbidden_error`; retorno con `meli_update_forbidden: True`; notification.py (cuenta única) cierra esa noti como SUCCESS. El freno no cambia: la venta sigue sin tocarse.
+**Prueba:** tests/test_26309_venta_bloqueada.py (tag meli_26309, camino real orders_update_order_json). Fix verde 16-19; control origin rojo.
+
+## 25 oct 2026 — línea de envío ML en $0 «A facturar» en venta ya facturada [158] (v19.0.26.307)
+**Síntoma (158, SO ML 2000019153738674):** factura del producto posteada; línea de envío «ME1 - zip» $0 con qty_to_invoice=1 / «to invoice» (escrita por el sistema 25-oct 13:53Z); el compute (26.268) evaluado en memoria da 0 / invoiced. Chatter: «ML quiso modificar… ya facturada. Cambio no aplicado: envío 0.0 -> 51222.31».
+**Causa:** models/shipment.py, rama `elif delivery_price > 0.0` (17/18/19 L1175-1188; 16 L1216-1237): escribía `qty_to_invoice = pedida - facturada` DIRECTO sobre el campo calculado aunque el guard de venta facturada (`_meli_guard_delivery_write`, versions.py) hubiera frenado el precio ⇒ línea $0 a facturar. En 16.0 la rama ya tenía guard (no reproducía por ese camino). Un «Crear factura» manual (sale_order.py `_get_invoiceable_lines`, no mira `_can_be_invoiced_alone`) armaba factura con una sola línea de envío $0.
+**Fix:** `sale.order.line._meli_refresh_shipping_invoice_qty` (orders.py): envío ML ⇒ no se escribe, se pide recompute (línea + pedido); otro envío ⇒ comportamiento previo sólo con precio > 0. migrations/19.0.26.307/post-migrate.py: recompute de envíos ML $0 con qty_to_invoice != 0 (envíos con precio NO se tocan).
+**Prueba:** tests/test_158_envio_a_facturar.py (tag meli_158_envio): refresh, re-sync real `_update_sale_order_shipping_info` sobre venta facturada, migración acotada. Fix verde 16-19; control origin 26.306 rojo en 17/18/19 (`1.0 != 0.0`).
+
+## 25 oct 2026 — test de regresión: envío de una venta facturada no se baja a 0 [#526] (v19.0.26.305)
+**Causa (fork Deco 19.0.26.86, NO el source):** re-sync de la venta ML 2000018616975582 (FA-B pagada 46.308,31) llevó el envío 3.353,98 → 0: residual "envío con cupón" < 0 + `delivery_line.price_unit = 0.0` sin guard. El source tiene `_meli_guard_delivery_write` (versions.py) desde 26.94.
+**Fix:** sin cambio de código; `tests/test_526_envio_facturada.py` (tag `meli_526_envio`) fija el guard (set_delivery_line no baja el envío con factura posteada). Verde en 16/17/18/19 (fix y origin).
+
 ## 24 oct 2026 — release 26.302: _action_assign(force_qty) / Pillow (v19.0.26.302)
 **Causa:** override `_action_assign(self)` sin `force_qty`; el core stock 16–19 es `_action_assign(self, force_qty=False)` y mrp llama `super()._action_assign(force_qty=...)` ⇒ TypeError si mrp queda encima en el MRO. **Fix:** firma y super con `force_qty` (port de 20.0, lint test_override_signatures).
 **Pillow:** fuera de requirements.txt (compat-20 clase A).
@@ -1668,3 +1684,16 @@ EXIT=0, sin `ParseError`; `sale.order.meli_unread_messages` presente en el regis
 
 ## 19.0.26.222 — 13-oct-2026 · migración SLA renombrada (26.188 → 26.222)
 - La migración de #431 (llenar `meli_handling_limit` almacenado por SQL) vivía en `migrations/19.0.26.188/`: ninguna base por encima de 26.188 la habría corrido y Odoo recalcularía el related registro por registro. Se movió a `19.0.26.222/`; es idempotente (`ADD COLUMN IF NOT EXISTS` + `UPDATE`). Probado: instalado 26.221 → `-u` 26.222 en 16/17/18/19, la migración corre (banco Postgres, 13-oct).
+
+## 26.306 (25-oct-2026) — #607 PetMarkt 393: `cancel_return_full=1` sin `by_reason`
+**Causa:** `models/orders.py` `_meli_return_done_pickings`, guard FULL (26.171/26.278): sólo se levantaba con el
+context `meli_cancel_return_full`, que arma únicamente `_meli_cancel_by_reason` (política by_reason). En el modo
+legacy el parámetro no tenía efecto ⇒ FULL nunca devolvía. Medido en la 393 (pase 26.294): 129 de 131 salidas
+de ventas canceladas son FULL.
+**Fix:** el guard se levanta con el context **o** con el parámetro (`_meli_cancel_return_full_on()`). Sin el
+parámetro: idéntico. Motivos, pack_splitted legacy y anti-duplicado siguen igual.
+**Tests:** `tests/test_26306_full_return_legacy.py` (tag meli_26306, 7 casos: FULL legacy sin/con param,
+no duplica, motivo fuera de lista, pack_splitted, by_reason+param = 1 devolución, no-FULL sin cambios).
+Fix 7/7 en 16-19; control origin 26.305 rojo en 02/03. Suites /meli_oerp,/accounting,/multiple,/stock: 0
+regresiones (preexistentes idénticas fix/ctl). Accounting: `tests/test_26306_sign_invoice.py` (regresión de
+meli_sign_invoice, fix de 26.302): 4/4; control accounting pre-302 ⇒ NameError: name 'config' is not defined.

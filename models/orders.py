@@ -22,6 +22,7 @@
 from odoo import fields, models, api
 from odoo.tools import html_escape
 from odoo.exceptions import UserError
+from odoo.tools.translate import _
 from markupsafe import Markup
 import logging
 import re
@@ -189,7 +190,8 @@ def _meli_partner_fiscal_sql_fix(cr, partner_id, set_clauses, values):
     que imports concurrentes sobre un mismo contacto se maten entre sí. Devuelve filas tocadas.
     """
     cols = [clause.split('=')[0].strip() for clause in set_clauses]
-    cr.execute(
+    # set_clauses son literales del código ("vat = %s", ...); los valores van como parámetros
+    cr.execute(  # pylint: disable=sql-injection
         "UPDATE res_partner SET " + ", ".join(set_clauses) + " WHERE id = %s AND ("
         + " OR ".join("%s IS DISTINCT FROM %%s" % col for col in cols) + ")",
         tuple(list(values) + [partner_id] + list(values)))
@@ -302,6 +304,38 @@ class sale_order_line(models.Model):
             if line._meli_shipping_line_is_free() and line.invoice_status == 'no':
                 line.invoice_status = 'invoiced'
         return res
+
+    def _meli_refresh_shipping_invoice_qty(self):
+        """[158, 26.307] Deja la cantidad a facturar de la linea de envio en manos del compute.
+
+        Antes shipment.py escribia `qty_to_invoice = pedida - facturada` DIRECTO cada vez que ML
+        informaba un envio con precio, aunque el guard de venta facturada hubiera frenado el
+        cambio de precio: la linea quedaba en $0 con qty_to_invoice=1 / "A facturar" (158, SO
+        ML 2000019153738674, 25-oct). Un valor escrito a mano sobre un campo calculado no lo
+        recalcula nadie hasta que cambie una dependencia.
+
+        - Linea de envio ML (`_meli_is_ml_shipping_line`): NO se escribe; se pide el recompute de
+          qty_to_invoice/invoice_status de la linea y del pedido (si nada cambio, Odoo no escribe).
+        - Otra linea de envio (metodo de entrega por stock, fuera del alcance de 26.231): el
+          comportamiento previo, pero SOLO si la linea tiene precio.
+        """
+        Line = self.env['sale.order.line']
+        for line in self:
+            if line.state == 'cancel' or not line.is_delivery:
+                continue
+            if line._meli_is_ml_shipping_line():
+                self.env.add_to_compute(Line._fields['qty_to_invoice'], line)
+                self.env.add_to_compute(Line._fields['invoice_status'], line)
+                self.env.add_to_compute(line.order_id._fields['invoice_status'], line.order_id)
+                continue
+            if (line.price_unit or 0.0) <= 0.0:
+                continue
+            expected = max((line.product_uom_qty or 1.0) - (line.qty_invoiced or 0.0), 0.0)
+            if line.qty_to_invoice != expected:
+                line.qty_to_invoice = expected
+                _logger.info("MELI shipment: restored qty_to_invoice=%.2f on delivery line for SO %s "
+                             "(price=%.2f, product=%s)", expected, line.order_id.name, line.price_unit,
+                             line.product_id.default_code or line.product_id.name)
 
     def _can_be_invoiced_alone(self):
         # (16.0 no tiene este hook: ahi lo resuelve delivery._compute_invoice_status)
@@ -653,7 +687,7 @@ class sale_order(models.Model):
     meli_shipping_list_cost = fields.Float(string='Shipping List Cost',help='Gastos de envío, costo de lista/interno')
     meli_paid_amount = fields.Float(string='Paid amount',help='Paid amount (include shipping cost)')
     meli_fee_amount = fields.Float(string='Fee amount',help="Comisión")
-    meli_coupon_amount = fields.Float(string='Coupont amount',help="Descuento",default=0.0)
+    meli_coupon_amount = fields.Float(string='Coupon amount',help="Descuento",default=0.0)
     meli_discount_seller_amount = fields.Float(string='Discount Seller Amount',help="Monto del descuento que absorbe el vendedor (desde /orders/{id}/discounts)",default=0.0)
     meli_financing_fee_amount = fields.Float(string='Financing fee amount',help="Financiamiento",default=0.0)
 
@@ -661,7 +695,7 @@ class sale_order(models.Model):
 #        'buyer': fields.many2one( "mercadolibre.buyers","Buyer"),
 #       'meli_seller': fields.text( string='Seller' ),
     meli_shipping_id =  fields.Char('Meli Shipping Id')
-    meli_shipment = fields.Many2one('mercadolibre.shipment',string='Meli Shipment Obj')
+    meli_shipment = fields.Many2one('mercadolibre.shipment',string='Meli Shipment Obj', index='btree_not_null')
     meli_shipment_pdf_file = fields.Binary(string='Pdf File',attachment=True, related="meli_shipment.pdf_file",readonly=True)
     meli_shipment_pdf_filename = fields.Char(string='Pdf Filename',related="meli_shipment.pdf_filename",readonly=True)
     # Zona del receiver (comprador) expuesta en la propia orden para buscar/filtrar/agrupar.
@@ -918,35 +952,6 @@ class sale_order(models.Model):
             #            if line.product_id and line.product_id.meli_id and line.product_id.meli_pub:
             #                _logger.info("Order done: product_post_stock: "+str(line.product_id.meli_id))
             #                #line.product_id.product_post_stock()
-        except:
-            pass;
-        return res
-
-    def action_done(self):
-        #_logger.info(meli order action done: " + str(self.mapped("name")) )
-        res = super(sale_order,self).action_done()
-        try:
-            for order in self:
-                if(order.meli_order_id):
-                    for line in order.order_line:
-                        if ((line.is_delivery and line.price_unit<=0.0) and line.qty_to_invoice>0):
-                            #_logger.info(line)
-                            line.write({ "qty_to_invoice": 0.0 })
-                            #_logger.info(line.qty_to_invoice)
-                            pass;
-        except:
-            pass;
-
-        try:
-            company = self.env.user.company_id
-            #_logger.info(Company: "+str(company))
-            #_logger.info(Order done: company.mercadolibre_cron_post_update_stock: "+str(company.mercadolibre_cron_post_update_stock))
-            #for order in self:
-            #    for line in order.order_line:
-            #        if (company.mercadolibre_cron_post_update_stock):
-            #            if line.product_id and line.product_id.meli_id and line.product_id.meli_pub:
-            #                #_logger.info(Order done: product_post_stock: "+str(line.product_id.meli_id))
-            #                line.product_id.product_post_stock()
         except:
             pass;
         return res
@@ -1524,7 +1529,7 @@ class sale_order(models.Model):
                 self.with_context(meli_force_mts_product_ids=forced_ids).action_confirm()
                 # Nunca venta confirmada SIN albarán.
                 if self._meli_draft_moves_without_picking():
-                    raise UserError("quedaron movimientos sin albarán")
+                    raise UserError(_("quedaron movimientos sin albarán"))
         except Exception as e2:
             _logger.warning("MELI confirm waiting: reintento en make_to_stock FALLÓ en SO %s (id=%s): %s",
                             self.name, self.id, self._meli_exception_text(e2))
@@ -2647,7 +2652,11 @@ class sale_order(models.Model):
         # decidía `por_estado_ml` (SHIP_FULFILLMENT => no mover stock) y lo que dice la ayuda.
         # 26.278 (#624): con la politica por motivo y meli_oerp.cancel_return_full=1 el cliente
         # lleva el stock del deposito FULL en Odoo: la devolucion vuelve a la ubicacion de origen.
-        if self.is_meli_order_fulfillment() and not self.env.context.get('meli_cancel_return_full') and self.picking_ids.filtered(
+        # 26.306 (#607): el parametro vale SOLO, tambien en modo legacy (sin by_reason). Sin el
+        # parametro en 1 nada cambia. Siguen mandando cancel_return_reasons, pack_splitted y
+        # mercadolibre_return_mode, y el chequeo de "ya devuelta" evita duplicar.
+        full_return = self.env.context.get('meli_cancel_return_full') or self._meli_cancel_return_full_on()
+        if self.is_meli_order_fulfillment() and not full_return and self.picking_ids.filtered(
                 lambda p: p.state == "done" and p.picking_type_code == "outgoing"):
             _logger.info("_meli_return_done_pickings: %s es FULL -> no se crea devolucion", self.name)
             meli_message_post(self, "Cancelación de ML: envío FULL (el stock lo gestiona MercadoLibre en su "
@@ -4682,8 +4691,10 @@ class mercadolibre_orders(models.Model):
             #    sorder = saleorder_obj.browse(sorder_s[0] )
 
         if (sorder and sorder.meli_update_forbidden):
-            _logger.error("Forbidden to upate by meli_oerp" )
-            return {'error': 'Forbidden to upate by meli_oerp' }
+            # 26.309 (158): freno sin escritura. WARNING una vez por venta (era ERROR en cada
+            # llamada) + marca para que la notificacion se cierre sin reintentar.
+            meli_log_update_forbidden(_logger, sorder, " (orden ML %s)" % order_json.get("id"))
+            return {'error': 'Forbidden to upate by meli_oerp', 'meli_update_forbidden': True}
 
         seller_id = None
         if config.mercadolibre_seller_user:
@@ -4836,10 +4847,10 @@ class mercadolibre_orders(models.Model):
             query = """SELECT id
             FROM   mercadolibre_buyers
             WHERE
-            buyer_id = '%s'
-            """ % (buyer_fields['buyer_id'])
+            buyer_id = %s
+            """
             cr = MeliCr( self )
-            respquery = cr.execute(query)
+            respquery = cr.execute(query, (str(buyer_fields['buyer_id']),))
             results = cr.fetchall()
             buyer_ids = results
             #_logger.info("Buyer ids: "+str(buyer_ids))
@@ -6543,11 +6554,11 @@ class mercadolibre_orders(models.Model):
                 query = """SELECT id
                 FROM   mercadolibre_order_items
                 WHERE
-                order_item_id = '%s'
-                AND order_id = %i
-                """ % ( order_item_fields['order_item_id'], order and order.id)
+                order_item_id = %s
+                AND order_id = %s
+                """
                 cr = MeliCr( self )
-                respquery = cr.execute(query)
+                respquery = cr.execute(query, (str(order_item_fields['order_item_id']), int(order and order.id)))
                 results = cr.fetchall()
                 order_item_ids = results
 
@@ -7938,7 +7949,7 @@ class mercadolibre_orders(models.Model):
 
     shipping = fields.Text(string="Shipping")
     shipping_id = fields.Char(string="Shipping id")
-    shipment = fields.Many2one('mercadolibre.shipment',string='Shipment')
+    shipment = fields.Many2one('mercadolibre.shipment',string='Shipment', index='btree_not_null')
     shipment_logistic_type = fields.Char(string="Logistic Type",index=True)
 
     fee_amount = fields.Float(string='Fee total amount')
@@ -8006,7 +8017,7 @@ class mercadolibre_payments(models.Model):
     _name = "mercadolibre.payments"
     _description = "Pagos en MercadoLibre"
 
-    order_id = fields.Many2one("mercadolibre.orders",string="Order")
+    order_id = fields.Many2one("mercadolibre.orders",string="Order", index='btree_not_null')
     payment_id = fields.Char('Payment Id')
     transaction_amount = fields.Float('Transaction Amount')
     total_paid_amount = fields.Float('Total Paid Amount')
