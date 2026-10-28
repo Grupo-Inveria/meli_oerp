@@ -344,6 +344,114 @@ class sale_order_line(models.Model):
         sup = getattr(super(sale_order_line, self), '_can_be_invoiced_alone', None)
         return sup() if sup else True
 
+    # ------------------------------------------------------------------
+    # [#526, 26.316] Precio de la linea de PRODUCTO de una venta ML: lo manda ML.
+    # Medido en prod de Deco (27-oct, SO 13151 y 34 ventas mas desde el 19-oct): un campo
+    # Studio del cliente (`x_studio_precio_por_medida`, depends product_id/ancho/largo) termina
+    # su compute con `record['price_unit'] = <formula>`. Como la sincronizacion reescribia
+    # `product_id` en CADA re-sync (aunque no cambiara), ese compute corria DENTRO del write del
+    # conector y pisaba el precio de ML: con la formula en 0 la venta quedaba en $0, y si no, con
+    # un precio de fabrica que no es lo cobrado. Tambien pisaba la correccion manual del operador
+    # en cada re-sync. Dos reglas:
+    #  1) no se reescribe lo que no cambio (no dispara computes ajenos en cada re-sync);
+    #  2) si despues del write el precio no es el de ML, se restituye escribiendo SOLO price_unit
+    #     (no toca las dependencias del compute ajeno) y se avisa UNA vez en la venta.
+    # Solo en ventas no confirmadas/bloqueadas: es el mismo alcance del write de siempre.
+    # ------------------------------------------------------------------
+    def _meli_vals_changed(self, vals):
+        """Subconjunto de `vals` que cambia algo en la linea (self, un registro)."""
+        self.ensure_one()
+        upd = {}
+        for key, val in vals.items():
+            field = self._fields.get(key)
+            if field is None or field.type in ('one2many', 'many2many'):
+                upd[key] = val
+                continue
+            cur = self[key]
+            if field.type == 'many2one':
+                if (cur.id or False) != (val or False):
+                    upd[key] = val
+            elif field.type in ('float', 'monetary'):
+                if abs(float(cur or 0.0) - float(val or 0.0)) > 1e-6:
+                    upd[key] = val
+            elif field.type == 'integer':
+                if int(cur or 0) != int(val or 0):
+                    upd[key] = val
+            elif field.type in ('char', 'text', 'selection', 'html'):
+                if str(cur or '') != str(val or ''):
+                    upd[key] = val
+            elif cur != val:
+                upd[key] = val
+        return upd
+
+    # ------------------------------------------------------------------
+    # [26.326, regresion 26.316 — fix de referencia fork Deco #526 d3b7b4a] Impuestos de la linea de
+    # PRODUCTO de una venta ML. Medido en prod (28-oct, SO 13275, pack NUEVO): el bloque viejo comparaba
+    # contra la compania de `sorder`, que en un pack nuevo esta vacio => quitaba el IVA correcto y no
+    # agregaba ninguno. Hasta 26.315 lo tapaba el write completo (product_id recomputa los impuestos);
+    # 26.316 (`_meli_write_ml_line`, solo lo que cambio) lo destapo: la linea quedaba sin IVA
+    # (total = cobrado/1,21) y en el sync siguiente `tid` sin asignar => UnboundLocalError.
+    # Regla: impuestos = los del producto de la COMPANIA DE LA VENTA; el IVA informado por ML elige entre
+    # ellos; una linea nunca queda sin impuestos si el producto los tiene para esa compania.
+    # ------------------------------------------------------------------
+    def _meli_sync_line_taxes(self, product, sale_order, tax_field):
+        for line in self:
+            company = (sale_order and sale_order.company_id) or line.order_id.company_id or line.company_id
+            if not company or not product:
+                continue
+            ptaxes = product.sudo().taxes_id.filtered(lambda t: t.company_id.id == company.id)
+            iva_name = line.meli_order_item_iva
+            tax_iva = ptaxes.filtered(lambda t: tax_names_equivalent(t.name, iva_name))[:1] if (iva_name and ptaxes) else ptaxes.browse()
+            current = line[tax_field]
+            keep = current.filtered(lambda t: t.company_id.id == company.id and (not tax_iva or t == tax_iva))
+            if not keep and ptaxes:
+                keep = tax_iva or ptaxes
+            if set(keep.ids) != set(current.ids):
+                _logger.info("MELI 26.326: %s linea %s impuestos %s -> %s", line.order_id.name, line.id, current.ids, keep.ids)
+                line[tax_field] = [(6, 0, keep.ids)]
+        return True
+
+    def _meli_write_ml_line(self, vals, config=None):
+        """Write de la linea de producto ML desde la sincronizacion (ver bloque [#526, 26.316])."""
+        for line in self:
+            upd = line._meli_vals_changed(vals)
+            if upd:
+                line.write(upd)
+            if 'price_unit' in vals:
+                line._meli_enforce_ml_price(vals.get('price_unit'), config=config)
+        return True
+
+    def _meli_enforce_ml_price(self, price_unit, config=None):
+        """Si una personalizacion piso el precio de ML durante el write, se restituye."""
+        if price_unit is None:
+            return False
+        restored = False
+        for line in self:
+            so = line.order_id
+            if not so or so.state in ('sale', 'done', 'cancel') or ('locked' in so._fields and so.locked):
+                continue
+            current = float(line.price_unit or 0.0)
+            if abs(current - float(price_unit)) <= 0.005:
+                continue
+            line.with_context(meli_enforce_ml_price=True).write({'price_unit': price_unit})
+            after = float(line.price_unit or 0.0)
+            ok = abs(after - float(price_unit)) <= 0.005
+            restored = restored or ok
+            _logger.warning("MELI #526: %s linea %s (%s): el precio de ML %.6f quedo en %.6f despues del write "
+                            "(personalizacion que escribe price_unit): %s",
+                            so.name, line.id, line.product_id.default_code or line.product_id.display_name,
+                            float(price_unit), current, ok and "restituido" or "NO se pudo restituir (%.6f)" % after)
+            if ok:
+                msg = _("MercadoLibre: el precio de la linea %s quedo en %s despues de sincronizar (lo cambio una "
+                        "personalizacion de la base que escribe el precio de la linea). Se restituyo el precio de "
+                        "MercadoLibre: %s.") % (line.product_id.display_name, round(current, 2), round(float(price_unit), 2))
+            else:
+                msg = _("MercadoLibre: el precio de la linea %s no es el de MercadoLibre (%s) y no se pudo restituir: "
+                        "queda en %s. Revise las personalizaciones que escriben el precio de la linea.") % (
+                            line.product_id.display_name, round(float(price_unit), 2), round(after, 2))
+            meli_message_post(so, msg, config=config, once_key="precio-ml-pisado-%s" % line.id)
+        return restored
+
 class sale_order(models.Model):
     _inherit = "sale.order"
 
@@ -3534,6 +3642,18 @@ class sale_order(models.Model):
 </div>
 """).format(reason=reason_html, steps=steps_html)
 
+def _meli_item_ref(Item):
+    """26.318: id del ítem para el log, sea el dict de ML o un mercadolibre.order_items (el armado del
+    pack pasa el record: `Item.get(...)` sobre un record levantaba AttributeError en la guarda)."""
+    try:
+        if isinstance(Item, dict):
+            _it = Item.get('item')
+            return (_it.get('id') if isinstance(_it, dict) else None) or '-'
+        return getattr(Item, 'order_item_id', None) or '-'
+    except Exception:
+        return '-'
+
+
 class mercadolibre_orders(models.Model):
     _name = "mercadolibre.orders"
     _description = "Pedidos en MercadoLibre"
@@ -4174,7 +4294,38 @@ class mercadolibre_orders(models.Model):
                "revise las líneas de la venta.") % (_item, _var or '-', line_fields.get('product_uom_qty'))
         meli_message_post(sorder, msg, config=config, once_key="linea-no-agregada-%s-%s" % (_item, _var or ''))
 
-    def _set_product_unit_price( self, product_related_obj, Item, config=None, items_total=None ):
+    @api.model
+    def _meli_pack_seller_discount(self, pack_orders):
+        """26.318 (#431 B) descuento del VENDEDOR de un pack/carrito y su base de prorrateo.
+
+        Devuelve (descuento, bruto):
+          descuento = suma de `discount_seller_amount` de las órdenes miembro (cada una lo trae de SU
+                      /orders/{id}/discounts; los tipos que ya están en el precio no cuentan),
+          bruto     = suma de unit_price * quantity de los ítems de esas órdenes.
+        Es un importe de nivel PACK: quien lo usa lo prorratea por el bruto de cada ítem
+        (_set_product_unit_price con items_total=bruto). Si el descuento no es menor que el bruto el
+        dato no es coherente y se devuelve 0: se factura a precio pleno (romper el precio es peor que no
+        aplicar el descuento; incidente 26.131).
+        """
+        disc = 0.0
+        gross = 0.0
+        for mo in (pack_orders or []):
+            disc += float(mo.discount_seller_amount or 0.0)
+            for it in mo.order_items:
+                try:  # unit_price es Char en mercadolibre.order_items
+                    gross += float(it.unit_price or 0.0) * float(it.quantity or 0.0)
+                except (TypeError, ValueError):
+                    pass
+        disc = round(disc, 2)
+        gross = round(gross, 2)
+        if disc > 0.0 and (gross <= 0.0 or disc >= gross - 0.005):
+            _logger.warning("MELI pack %s: descuento del vendedor %.2f >= bruto del pack %.2f: NO se aplica "
+                            "(se factura a precio pleno)",
+                            ','.join(str(mo.order_id) for mo in (pack_orders or [])), disc, gross)
+            disc = 0.0
+        return disc, gross
+
+    def _set_product_unit_price( self, product_related_obj, Item, config=None, items_total=None, seller_discount=None ):
         """Precio unitario de la línea = precio de ML menos el descuento que paga el VENDEDOR.
 
         26.229 (cupón a cargo del vendedor): `discount_seller_amount` es un importe de la
@@ -4184,7 +4335,10 @@ class mercadolibre_orders(models.Model):
         (packs: una orden = un ítem) el ítem lleva todo el descuento, como antes.
         """
         order = self
-        seller_discount = float(order.discount_seller_amount or 0)
+        # 26.318 (#431 B): `seller_discount` explícito = descuento del PACK (lo prorratea items_total).
+        if seller_discount is None:
+            seller_discount = float(order.discount_seller_amount or 0)
+        seller_discount = float(seller_discount or 0.0)
         _qty = float(Item['quantity'] or 1.0)
         _gross = float(Item['unit_price']) * _qty
         if seller_discount and items_total and float(items_total) > 0.0 and _gross < float(items_total) - 0.005:
@@ -4196,7 +4350,7 @@ class mercadolibre_orders(models.Model):
         if seller_discount and _gross > 0.0 and seller_discount >= _gross - 0.005:
             _logger.warning("MELI _set_product_unit_price orden %s: descuento del vendedor %.2f >= bruto del item %.2f "
                             "(%s): NO se aplica (se factura a precio pleno)",
-                            order.order_id or '-', seller_discount, _gross, Item.get('item', {}).get('id') if isinstance(Item.get('item'), dict) else '-')
+                            order.order_id or '-', seller_discount, _gross, _meli_item_ref(Item))
             seller_discount = 0.0
         unit_price = float(Item['unit_price']) - float(seller_discount / _qty)
         upd_line = {
@@ -6215,9 +6369,14 @@ class mercadolibre_orders(models.Model):
                     _payments_coupon += float(_p.get('coupon_amount') or 0.0)
                 except (TypeError, ValueError):
                     pass
-        # Sólo órdenes SIN pack: en una orden miembro de un pack el cupón de los pagos es del PACK y
-        # su descuento no se puede restar por línea sin prorratear (incidente 26.131, revertido en 26.135).
-        if order and (order.coupon_amount > 0 or (_payments_coupon > 0 and not order.pack_id)):
+        # 26.318 (#431 B): la orden miembro de un PACK también busca SU descuento. Antes se salteaba
+        # (precaución por el incidente 26.131) y el carrito con cupón del vendedor quedaba a precio lleno,
+        # por ARRIBA de lo cobrado. ML informa el descuento POR ORDEN (medido en 431: la suma de
+        # /discounts de las órdenes de un carrito = el cupón del carrito; no se repite por orden) y queda
+        # en la mercadolibre.orders de cada miembro. Las líneas del pack las arma
+        # mercadolibre.shipment, que PRORRATEA el total del pack por el bruto de cada ítem
+        # (_meli_pack_seller_discount): nunca se resta el importe del pack entero en una línea.
+        if order and (order.coupon_amount > 0 or _payments_coupon > 0):
             order._fetch_order_discounts(meli=meli)
             meli_order_fields['meli_discount_seller_amount'] = order.discount_seller_amount or 0.0
 
@@ -6710,39 +6869,16 @@ class mercadolibre_orders(models.Model):
                         #_logger.info(product_related_obj taxes_id:"+str(product_related_obj.taxes_id and product_related_obj.taxes_id.company_id))
                         #_logger.info(saleorderline_item_ids tax:"+str(saleorderline_item_ids[tax_field]))
                         #_logger.info(saleorderline_item_ids tax company_id:"+str(saleorderline_item_ids[tax_field].company_id))
-                        tax_iva_name = saleorderline_item_ids.meli_order_item_iva
-                        tax_iva_name = tax_iva_name
-                        tax_iva_id = None
-                        if tax_iva_name and product_related_obj.taxes_id:
-                            for txid in product_related_obj.taxes_id:
-                                if ( tax_names_equivalent(txid.name,tax_iva_name) ):
-                                    tax_iva_id = txid
-
-                        tid = None  # un caso: si la línea no trae impuestos el for no corre y abajo se usaba tid sin definir
-                        for tid in saleorderline_item_ids[tax_field]:
-
-                            if (tid.company_id.id!=sorder.company_id.id 
-                                or (tax_iva_id and tax_iva_id!=tid) ):
-                                #remove
-                                saleorderline_item_ids[tax_field] = [(3, tid.id)]
-
-                        if not saleorderline_item_ids[tax_field] and product_related_obj.taxes_id:
-                            for txid in product_related_obj.taxes_id:
-                                if (txid.company_id.id==sorder.company_id.id):
-                                    if (tax_iva_id):
-                                        if (tax_iva_id!=tid):
-                                            #add
-                                            saleorderline_item_ids[tax_field] = [(4, txid.id)]
-                                    else:
-                                        #add
-                                        saleorderline_item_ids[tax_field] = [(4, txid.id)]
+                        # [26.326] impuestos de la compania de la venta (ver sale.order.line._meli_sync_line_taxes)
+                        saleorderline_item_ids._meli_sync_line_taxes( product_related_obj, sorder, tax_field )
 
                         if (sorder.state and sorder.state in ['done','sale']) or ("locked" in sorder._fields and sorder.locked):
                             #_logger.warning("Orden bloqueada no se puede actualizar")
                             pass;
                         else:
                             _logger.info("Sale Order line write")
-                            saleorderline_item_ids.write( ( saleorderline_item_fields ) )
+                            # [#526, 26.316] solo lo que cambio + precio de ML restituido si lo pisan
+                            saleorderline_item_ids._meli_write_ml_line( saleorderline_item_fields, config=config )
 
         if 'payments' in order_json:
             payments = order_json['payments']

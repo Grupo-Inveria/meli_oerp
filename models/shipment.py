@@ -84,7 +84,7 @@ def _meli_label_download(url, access_token, timeout=60, session=None):
 # `import *` no trae los nombres con guion bajo: este guard se importa explicito [un caso]
 from .versions import _meli_guard_delivery_write
 from .meli_util import meli_instance_url, meli_instance_session
-from .receiver_cost import receiver_buyer_cost
+from .receiver_cost import receiver_buyer_cost, seller_collected_shipping, pack_receiver_cost, receiver_gross_cost
 
 #
 #     https://www.odoo.com/fr_FR/forum/aide-1/question/solved-call-report-and-save-result-to-attachment-133244
@@ -682,6 +682,40 @@ class mercadolibre_shipment(models.Model):
                 st_pick.carrier_tracking_ref = tracking
                 updated += 1
         return updated
+
+    def _meli_pack_receiver_cost(self, meli, ship_id, rcosts):
+        """[#158/#462/#535] Flete del comprador que COBRO el vendedor (shipping_receiver_cost).
+
+        Un GET a MercadoPago (/v1/payments/search?external_reference=<envio>, token en el header,
+        timeout corto) y SOLO si /costs trae receiver.cost > 0. Corre antes de escribir el envio y no
+        escribe nada. Si la consulta falla, NO se asume: queda el valor que el envio ya tenia (o, si es
+        nuevo, el criterio anterior) y queda en el log."""
+        if receiver_gross_cost(rcosts) <= 0.0:
+            return 0.0
+        collected = None
+        token = getattr(meli, 'access_token', None)
+        if token and token != "PASIVA":
+            try:
+                resp = requests.get("https://api.mercadopago.com/v1/payments/search",
+                                    params={'external_reference': str(ship_id)},
+                                    headers={'Authorization': 'Bearer %s' % token, 'Accept': 'application/json'},
+                                    timeout=10)
+                if resp is not None and resp.status_code == 200:
+                    collected = seller_collected_shipping(resp.json(), ship_id)
+                else:
+                    _logger.warning("MELI envio %s: consulta MP del flete cobrado devolvio %s; no se asume nada",
+                                    ship_id, getattr(resp, 'status_code', None))
+            except Exception as e:
+                _logger.warning("MELI envio %s: consulta MP del flete cobrado fallo (%s); no se asume nada", ship_id, e)
+        previous = None
+        if collected is None:
+            self.env.cr.execute("SELECT shipping_receiver_cost FROM mercadolibre_shipment WHERE shipping_id=%s LIMIT 1",
+                                (str(ship_id),))
+            row = self.env.cr.fetchone()
+            previous = row[0] if row else None
+            _logger.warning("MELI envio %s: shipping_receiver_cost sin dato de cobro, queda %s",
+                            ship_id, previous if previous is not None else 'el criterio anterior')
+        return pack_receiver_cost(rcosts, collected, previous)
 
     def _meli_buyer_shipping_amount(self, order=None, config=None):
         """un caso - Flete que paga el COMPRADOR segun MercadoLibre (>= 0). Sin red.
@@ -1462,7 +1496,9 @@ class mercadolibre_shipment(models.Model):
                     # shipping_option.cost — sí acá, en /costs → receiver.cost.
                     # Descontando lo que cubre el vendedor (receiver.cost_details): con envío
                     # gratis subsidiado, receiver.cost viene lleno y el comprador pagó 0.
-                    ship_json['receiver_cost'] = receiver_buyer_cost(rcosts)
+                    # [#158/#462/#535] ...pero cost_details NO dice quien cobro: lo dice el pago MP
+                    # marketplace_shipment del envio (ver receiver_cost.py y _meli_pack_receiver_cost).
+                    ship_json['receiver_cost'] = self._meli_pack_receiver_cost(meli, ship_id, rcosts)
 
                 seller_id = None
                 if config.mercadolibre_seller_user:
@@ -1867,6 +1903,11 @@ class mercadolibre_shipment(models.Model):
                             else:
                                 totales['shipping_amount'] = shipment.shipping_cost
 
+                        # 26.318 (#431 B): descuento del vendedor del PACK (suma de los miembros) y bruto
+                        # para prorratearlo por ítem. Va también a la venta (meli_discount_seller_amount) para
+                        # que el importe a facturar sepa que el descuento ya está en las líneas.
+                        _pack_disc, _pack_gross = self.env['mercadolibre.orders']._meli_pack_seller_discount(all_orders)
+
                         #fix ML order_json... for pack_order "shipping_cost" added
                         if not mercadolibre_use_payment_shipping_amount and shipment.shipping_cost:
                             totales['paid_amount']+= shipment.shipping_cost
@@ -1919,6 +1960,8 @@ class mercadolibre_shipment(models.Model):
                             'meli_date_created': ml_datetime(all_orders[0]["date_created"]) or all_orders[0]["date_created"],
                             'meli_date_closed': ml_datetime(all_orders[0]["date_closed"]) or all_orders[0]["date_created"],
                         })
+                        if 'meli_discount_seller_amount' in self.env['sale.order']._fields:
+                            meli_order_fields['meli_discount_seller_amount'] = _pack_disc
                         #TODO: agregar un campo para diferencia cada delivery res partner al shipment y orden asociado, crear un binding usando values diferentes... y listo
                         #_logger.info("ship_json[receiver_address]:"+str(ship_json["receiver_address"]) )
                         if ('account.payment.term' in self.env):
@@ -2015,7 +2058,10 @@ class mercadolibre_shipment(models.Model):
                                 if (mOrder.fee_amount):
                                     sorder_pack.meli_fee_amount = sorder_pack.meli_fee_amount + mOrder.fee_amount
 
-                                saleorderline_item_fields.update( order._set_product_unit_price( product_related_obj, mOrder.order_items[0], config=config ) )
+                                # 26.318 (#431 B): el descuento del PACK prorrateado por el bruto de ESTE ítem
+                                # (antes: el de la orden que disparó el sync, entero, en cada línea).
+                                saleorderline_item_fields.update( mOrder._set_product_unit_price( product_related_obj, mOrder.order_items[0], config=config,
+                                                                                                   items_total=_pack_gross or None, seller_discount=_pack_disc ) )
 
                                 saleorderline_item_ids = saleorderline_obj.search( [('meli_order_item_id','=',saleorderline_item_fields['meli_order_item_id']),
                                                                                     ('meli_order_item_variation_id','=',saleorderline_item_fields['meli_order_item_variation_id']),
@@ -2046,31 +2092,9 @@ class mercadolibre_shipment(models.Model):
                                     #_logger.info(product_related_obj taxes_id:"+str(product_related_obj.taxes_id and product_related_obj.taxes_id.company_id))
                                     #_logger.info(saleorderline_item_ids tax:"+str(saleorderline_item_ids[tax_field]))
                                     #_logger.info(saleorderline_item_ids tax company_id:"+str(saleorderline_item_ids[tax_field].company_id))
-                                    tax_iva_name = saleorderline_item_ids.meli_order_item_iva
-                                    tax_iva_name = tax_iva_name
-                                    tax_iva_id = None
-                                    if tax_iva_name and product_related_obj.taxes_id:
-                                        for txid in product_related_obj.taxes_id:
-                                            if ( tax_names_equivalent(txid.name,tax_iva_name) ):
-                                                tax_iva_id = txid
-
-                                    for tid in saleorderline_item_ids[tax_field]:
-
-                                        if (tid.company_id.id!=sorder.company_id.id 
-                                            or (tax_iva_id and tax_iva_id!=tid) ):
-                                            #remove
-                                            saleorderline_item_ids[tax_field] = [(3, tid.id)]
-
-                                    if not saleorderline_item_ids[tax_field] and product_related_obj.taxes_id:
-                                        for txid in product_related_obj.taxes_id:
-                                            if (txid.company_id.id==sorder.company_id.id):
-                                                if (tax_iva_id):
-                                                    if (tax_iva_id!=tid):
-                                                        #add
-                                                        saleorderline_item_ids[tax_field] = [(4, txid.id)]
-                                                else:
-                                                    #add
-                                                    saleorderline_item_ids[tax_field] = [(4, txid.id)]
+                                    # [26.326] pack: la compania es la de sorder_pack (sorder esta vacio si el pack es nuevo)
+                                    # — ver sale.order.line._meli_sync_line_taxes
+                                    saleorderline_item_ids._meli_sync_line_taxes( product_related_obj, sorder_pack, tax_field )
                                     is_locked = ((sorder_pack and sorder_pack.state in ["done","sale"]) 
                                                 or ("locked" in sorder_pack._fields and sorder_pack.locked))
                                     if (is_locked):
@@ -2078,7 +2102,8 @@ class mercadolibre_shipment(models.Model):
                                         pass;
                                     else:
                                         #_logger.info("sale order line to write")
-                                        saleorderline_item_ids.write( ( saleorderline_item_fields ) )
+                                        # [#526, 26.316] solo lo que cambio + precio de ML restituido si lo pisan
+                                        saleorderline_item_ids._meli_write_ml_line( saleorderline_item_fields, config=config )
                     else:
                         #_logger.info("partner receiver id not founded:"+str(ship_fields['receiver_id']))
                         pass;

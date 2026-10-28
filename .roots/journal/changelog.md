@@ -4,6 +4,35 @@
 
 ---
 
+## 19.0.26.326 — 28-oct-2026 · Corrección: la línea de producto de un pack nuevo ya no queda sin IVA (y el sincronizado siguiente ya no falla), regresión de 26.316
+
+## 19.0.26.325 — 27-oct-2026 · Release de flota 26.325 (acompaña el enmascarado de tokens en los registros de estado de meli_oerp_multiple y odoo_connector_api, sin cambios propios)
+
+## 19.0.26.324 — 27-oct-2026 · Release de flota 26.324 (acompaña el enmascarado de tokens en los registros del conector de odoo_connector_api y meli_oerp_multiple, sin cambios propios)
+
+## 19.0.26.321 — 27-oct-2026 · Release de flota 26.321 (acompaña la corrección de seguridad del estado del conector en odoo_connector_api, sin cambios propios)
+
+## 19.0.26.320 — 27-oct-2026 · Release de flota 26.320 (acompaña la corrección del GTIN en publicaciones con variantes de meli_oerp_multiple, sin cambios propios)
+
+## 19.0.26.319 — 27-oct-2026 · Envío de ventas en carrito: se factura el flete que cobró el vendedor
+- En ventas de carrito (pack), la línea de envío vuelve a llevar el flete cuando el comprador lo pagó y lo cobró el vendedor. El dato sale del pago del envío en MercadoPago, no del detalle de costos del envío (que nombra al vendedor también cuando paga el comprador).
+- Si el envío lo cobra MercadoLibre y no el vendedor (por ejemplo, Full Súper), la línea queda en 0 como hasta ahora.
+- Si la consulta a MercadoPago falla, no se cambia el valor que ya tenía el envío.
+- Release de flota 26.319: mismo número en 16, 17, 18, 19 y 20 para los 7 módulos del suite.
+
+## 19.0.26.318 — 27-oct-2026 · Carrito con cupón del vendedor: la venta queda en lo que cobró MercadoLibre
+- En una compra de carrito (varias publicaciones en un mismo pago) con un cupón que paga el vendedor, la venta ya no queda a precio lleno: el descuento del carrito se reparte entre sus productos según el importe de cada uno, y la venta queda en lo que cobró MercadoLibre.
+- Un descuento del carrito nunca se resta entero en cada línea, y si no es coherente con el importe del carrito no se aplica (la venta queda a precio lleno, con aviso en el registro).
+- Aplica a ventas en presupuesto; las confirmadas no se tocan.
+- Release de flota 26.318: mismo número en 16, 17, 18 y 19 para los 7 módulos del suite.
+
+## 19.0.26.316 — 27-oct-2026 · El precio de la venta de MercadoLibre no lo cambia una personalización
+- Si la base tiene una personalización (por ejemplo, un campo de Studio en la línea de venta) que escribe el precio de la línea cuando cambia el producto, la sincronización con MercadoLibre ya no la dispara en cada actualización: sólo se escribe lo que cambió.
+- Si aun así el precio de la línea queda distinto del de MercadoLibre, se restituye el precio de MercadoLibre y queda un aviso en la venta (una vez). Aplica a ventas en presupuesto; las confirmadas no se tocan.
+- Release de flota 26.316: mismo número en 16, 17, 18, 19 y 20 para los 7 módulos del suite.
+
+## 19.0.26.315 — 27-oct-2026 · Release de flota 26.315 (acompaña la corrección del diario de factura de otra compañía en meli_oerp_accounting, sin cambios propios)
+
 ## 19.0.26.314 — 26-oct-2026 · Release de flota 26.314
 - Sin cambios en este módulo.
 - Release de flota 26.314: mismo número en 16, 17, 18, 19 y 20 para los 7 módulos del suite.
