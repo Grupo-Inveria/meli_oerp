@@ -4,6 +4,21 @@
 
 ---
 
+## 19.0.26.335 — 29-oct-2026 · Release de flota 26.335 (acompaña la novedad de meli_oerp_accounting: retenciones de MercadoPago registradas en el cobro del cliente, opcional por compañía)
+- **meli_oerp (#696):** las notificaciones de MercadoLibre ya procesadas (correctas o con error) se borran solas pasados 90 días — parámetro del sistema `meli_oerp.notification_days` (0 = no borrar nunca); las pendientes no se tocan. El registro del servidor deja de anotar en cada venta importada el JSON completo y el detalle de contactos/facturación (pasa a nivel DEBUG).
+- **meli_oerp (#696, contactos):** volver a importar una venta sin cambios ya no reescribe los contactos del comprador: el contacto de entrega dejaba de alternar el código postal en cada actualización (se borraba y se volvía a escribir, y cada cambio quedaba como mensaje de seguimiento en el contacto); un dato que no viene en la actualización ya no borra el guardado, y la lista de precios del comprador sólo se escribe si cambia.
+- **meli_oerp (dirección de facturación):** el contacto de facturación del comprador toma toda la dirección (calle, ciudad, código postal, país y estado/provincia) de los datos de facturación de Mercado Libre. Antes podía quedar con la calle y el código postal de facturación y el estado de la dirección de envío, un domicilio fiscal inexistente en la factura (CFDI en México, provincia en Argentina). Si Mercado Libre no informa el estado de facturación, se deduce del código postal o la ciudad, o queda vacío; nunca se toma el del envío.
+
+## 19.0.26.334 — 28-oct-2026 · Corrección: una lista de precios elegida al publicar gana sobre la de la configuración de la cuenta; el aviso genérico de atributos faltantes indica dónde se carga cada uno (acompaña a meli_oerp_multiple 26.334)
+## 19.0.26.333 — 28-oct-2026 · Release de flota 26.333 (alinea el suite en 16–20: lleva a 20.0 los cambios de producto de Mercado Libre de 26.332; sin cambios propios en 19.0)
+## 19.0.26.332 — 28-oct-2026 · Nuevo: cambios de producto de Mercado Libre. La venta de reemplazo queda ligada a la venta original (aviso en las dos) y, cuando la devolución llega, se registra el reingreso del artículo según la configuración de devoluciones (FULL incluido). Se activa con la tarea programada «MELI: cambios de producto».
+## 19.0.26.330 — 28-oct-2026 · Corrección: la venta de un carrito (pack) con cupón del vendedor entra con el monto que cobró Mercado Libre (el cupón se reparte entre las líneas del carrito)
+## 19.0.26.329 — 28-oct-2026 · Seguridad: los errores de MercadoLibre guardados en el producto y en las notificaciones ya no conservan el token de acceso; y la sincronización de reclamos ya no trae los reclamos donde la cuenta es la compradora
+
+## 19.0.26.328 — 28-oct-2026 · Corrección: sin cuenta de MercadoLibre conectada, abrir productos, la compañía o los formularios de ML ya no llena el registro de avisos «GET /sites 403»; y se corrigen caminos que podían cortar con error (importación con tienda oficial, re-login del listado de publicaciones, sincronización por SKU, precio fijo menor a 1, enlace de categoría del sitio)
+
+## 19.0.26.327 — 28-oct-2026 · Release de flota 26.327 (acompaña la corrección de meli_oerp_multiple: una venta que se reintentaba por un conflicto de concurrencia ya no se pierde; sin cambios propios)
+
 ## 19.0.26.326 — 28-oct-2026 · Corrección: la línea de producto de un pack nuevo ya no queda sin IVA (y el sincronizado siguiente ya no falla), regresión de 26.316
 
 ## 19.0.26.325 — 27-oct-2026 · Release de flota 26.325 (acompaña el enmascarado de tokens en los registros de estado de meli_oerp_multiple y odoo_connector_api, sin cambios propios)

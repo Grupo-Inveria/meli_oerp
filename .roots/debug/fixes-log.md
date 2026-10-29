@@ -4,6 +4,41 @@
 
 ---
 
+## 29 oct 2026 — el contacto de facturación mezclaba la dirección: estado del ENVÍO + calle/ciudad/CP de FACTURACIÓN [hallazgo de 535 #696] (v19.0.26.335)
+**Síntoma:** contacto de facturación (y el principal cuando hace de facturación: estrategia B / sin hijo) con calle, ciudad y CP de `billing_info` y el estado de la dirección de envío ⇒ domicilio fiscal inexistente (CFDI MX, provincia AR).
+**Causa:** `models/orders.py::state()` devuelve el estado del `Receiver` apenas matchea su código, sin mirar `billing_info.STATE_NAME`; `street()`/`city()`/`zip_code()` sí priorizan billing. Usado así en `meli_buyer_fields` (alta del principal), BILLING_SPLIT (dirección del hijo de facturación) y `parent_update`. Además `STATE_NAME=''` (v2 normalizado) hacía `name ilike ''` ⇒ primer estado del país.
+**Fix:** `_meli_billing_address_vals` (todo de billing_info; estado por código/nombre de billing → `res.city` por CP → mismo CP que el envío → letra del CPA (AR) → `res.city` por ciudad con estado único → vacío; sin claves vacías: un dato ausente no borra lo guardado) y `_meli_partner_address_vals` (billing entero, o envío entero si billing no trae dirección). `_meli_state_by_code_or_name`: código exacto (`MX-YUC`/`YUC`/`CMX`), nunca con valor vacío.
+**Prueba:** `tests/test_billing_address_misma_fuente.py` (tag `meli_billing_addr`, forma real de billing-info v2 MLM de 535): billing completo (Modo 3 y forzado al principal), billing sin estado (CP distinto ⇒ vacío; mismo CP ⇒ estado deducido), sin dirección de facturación ⇒ envío entero. Fix 6/6 verde 16-20; control origin 3 FAIL + 1 ERROR.
+**Nota:** un contacto de facturación YA existente con un estado mal tomado sólo se corrige si billing trae (o permite deducir) el estado; si no, no se vacía (criterio #696). `fix_locals` (BR `city_id` / CO `cities`) no se tocó.
+
+## 29 oct 2026 — el import de ventas reescribía el contacto de entrega en cada resync (CP vacío ↔ CP del JSON) [#696 T3LC 535] (v19.0.26.335)
+**Síntoma:** 535: 62.022 trackings `res.partner` `contact_address_inline` en oct-2026 (chatter de contactos).
+**Causa:** `models/orders.py::orders_update_order_json` armaba el `Receiver` desde el `mercadolibre.shipment` guardado SIN `zip_code` ⇒ `models/shipment.py::partner_delivery_id` escribía el contacto de entrega con CP vacío; en la misma vuelta el camino de packs (`fetch_shipment`) lo reescribía con el CP del JSON. Con `MeliCommit` entre ambos, cada alternancia = 1 tracking. Además `partner_delivery_id` comparaba `!=` crudo (ids vs records) y `property_product_pricelist` se asignaba en cada import.
+**Fix:** `_meli_receiver_from_shipment` (lleva `zip_code`, street_name/number); `shipment._meli_delivery_vals_to_write`: sólo lo que difiere (`_meli_partner_vals_changed`, de 26.228) y un vacío no pisa lo guardado; pricelist sólo si cambia.
+**Prueba:** `tests/test_696_contacto_sin_writes_redundantes.py` (tag `meli_696_partner`): 2º import idéntico = 0 writes y 0 `mail.tracking.value`. Control sobre origin: 8 writes en 2 vueltas + trackings, CP borrado.
+
+## 28 oct 2026 — cambios de producto de ML (orden con tag `change`): el devuelto nunca reingresaba [525 #701] (v26.332)
+**Síntoma:** ROEN (MLM): de 10 órdenes `change`, la venta de reemplazo entraba como otra venta y la original se cancelaba con su salida hecha y sin devolución (FULL); el artículo devuelto no reingresaba.
+**Modelo de ML (medido, GET read-only):** el cambio cuelga de un reclamo (`/post-purchase/v1/claims/{id}/changes`: `type` replace|change, `new_orders_ids`, `return.id`, `status`). ML crea una ORDEN NUEVA (tag `change`, pack/shipment nuevos) sin referencia al original (`related_orders`=None) + un return (`/v2/claims/{id}/returns`). Plata: cambio exitoso ⇒ ML cancela y reembolsa la ORIGINAL y cobra la nueva; vencido ⇒ al revés. Por eso la orden `change` se sigue importando con precio (no hay duplicado de plata).
+**Fix:** `models/change.py`: vínculo comprador → `claims/search?player_role=complainant&player_user_id=` → `/changes`; estado `meli_change_*` en `mercadolibre.orders` y `sale.order.meli_change_origin_sale_id`; avisos once en las dos ventas; return ENTREGADO ⇒ `_meli_return_done_pickings` sobre la venta ORIGINAL (respeta FULL/`cancel_return_full`, `return_mode`, "ya devuelta"); parcial/carrito ⇒ aviso manual; return ilegible (429) ⇒ reintenta. Fase 1 sólo GET sin escribir, fase 2 escrituras cortas con savepoint. Cron inactivo `ir_cron_meli_change_sync`.
+**Prueba:** tests/test_26332_cambios_producto.py (11) con los 10 payloads reales recortados (tests/data/meli_change_roen.json): caso 5582489788 (2000018593964050→2000018619790226, vencido), FULL entregado con/sin parámetro, re-sync idempotente, 429. Banco 16/17/18/19: 11/11; suite /meli_oerp,/meli_oerp_multiple,/meli_oerp_stock,/meli_oerp_accounting 439/422/391/378, 0 failed.
+**No cubre:** cambios PARCIALES de un carrito (aviso manual); órdenes previas al filtro de fecha de importación (no están en Odoo). FULL sin `meli_oerp.cancel_return_full=1` sigue sin reingreso (política vigente).
+
+## 28 oct 2026 — carrito (pack) con cupón del vendedor seguía a precio lleno con 26.318 [#431 B] (v26.330)
+**Síntoma:** 431 (prod 18.0.26.250.2, que trae 26.318): desde el pase, 51 de 51 carritos con cupón entraron sin el descuento (ej. pack 2000015746467903: 942.00 vs 894.90 cobrado); las ventas simples con cupón, bien.
+**Causa (medida en prod, RO):** en la orden miembro de un pack ML manda `coupon: null` y `payments[].coupon_amount: 0`; el cupón sólo está en `/orders/{id}/discounts`. La guarda de `orders_update_order_json` (`order.coupon_amount > 0 or _payments_coupon > 0`) daba False ⇒ `_fetch_order_discounts` nunca corría para los miembros (0 líneas `MELI discounts` en el log) ⇒ `discount_seller_amount` 0 ⇒ el prorrateo de 26.318 en `mercadolibre.shipment` no tenía nada que repartir. El test de 26.318 suponía el cupón en los pagos.
+**Fix:** la guarda también entra con `pack_id` + tag `order_has_discount` (la única señal en la orden). Una consulta por orden miembro, la misma que ya hace la venta simple; la venta simple no cambia. El reparto sigue siendo el de 26.318 (por bruto de cada ítem, nunca el importe del pack en una línea).
+**Prueba:** tests/test_431_cupon_pack.py +5 con el payload real (miembros 2000019213687240/2000019213698218: 18.25+28.85; armado 894.90; controles: pack sin tag no consulta, simple sólo-tag sin cambio, simple real 2000019211761592 = 1880.05). Control origin 26.328: 1 failed (el del payload real) en 16/17/18/19; fix 0 failed; suite /meli_oerp,/meli_oerp_multiple 18: 0 de 262.
+**No cubre:** ventas ya confirmadas (el sync no reescribe líneas de una venta confirmada): se reparan con meli-reparar-montos.py.
+
+## 28 oct 2026 — sin cuenta ML, la UI dejaba 12 `GET /sites: Auth error status=403` por recorrido + C-1 NameError latentes (v26.328)
+**Síntoma:** smoke de UI (Odoo.sh 20, builds 40520031/40547250, y banco 20) sin cuenta ML: 12 WARNING `meli_util GET /sites 403` (preexistente en 16–19).
+**Causa:** `res.company._get_ML_sites` consultaba `/sites` aunque el token estuviera vacío; lo llama `meli.util.get_new_instance` (vía `get_ML_AUTH_URL`) en cada instancia, y `get_ML_LINK_URL`; las instancias salen de computes de producto/categoría/preguntas/posting/compañía.
+**Fix:** sin access_token (o `PASIVA`) no se consulta `/sites`: se usa el mapa local (lo mismo que quedaba tras el 403). Con token: igual que antes.
+**C-1 (pylint undefined-variable 10 ⇒ 0; `get_ref_view` era falso positivo):** `_get_ML_currencies` `ML`⇒`ML_currencies`; `fetch_list_meli_ids` `account.write(tokens='')`⇒ se devuelve el login SIN borrar tokens; `product_meli_get_products` `rjson`⇒`rjson3` (tienda oficial); `get_all_items_from_existing_sku` `RATE_LIMIT` inexistente ⇒ `MELI_SKU_RATE_LIMIT=0.5`; `meli_pause_all` `ioff` inicializado; `meli_get_category` `cat_fields`⇒ `ml_cat.write(public_category…)`; `set_meli_price` `product_tmpl_id`⇒`product_tmpl`; `stock_inventory_action_done` `_stock`⇒`stock`, apply sobre el quant (no el producto), depósito de la compañía, create en inventory_mode.
+**Prueba:** tests/test_26328_sin_cuenta_y_c1.py (tag meli_26328). Banco 20: smoke ANTES 12/1/1 ⇒ DESPUÉS 0/0/0 (mismo recorrido); control origin 3 failed + 6 error de 11.
+**Abierto:** `create_ecommerce_category` hace `if not www_cats` sobre recordset vacío ⇒ nunca crea/enlaza categorías del sitio (decisión aparte).
+
 ## 28 oct 2026 — la línea de producto de un PACK NUEVO quedaba sin IVA; el sync siguiente fallaba con UnboundLocalError 'tid' [#526] (v26.326, regresión de 26.316)
 **Síntoma (526 Deco, fork 19.0.26.86.3 = source 26.316, 28-oct 06:53Z):** SO 13275 (pack nuevo de DELTA) con la línea de producto sin impuestos (total 62.190,08 vs 75.250 cobrado = ×1,21); cada re-sync: `cannot access local variable 'tid'`. 0 casos los 8 días previos.
 **Causa (reproducida en seco en prod 3/3):** en `fetch_shipment` el bloque de impuestos comparaba `tid.company_id != sorder.company_id`, y en un pack NUEVO `sorder` es el recordset vacío ⇒ quitaba el IVA correcto y no agregaba ninguno. Bug latente: hasta 26.315 lo tapaba el write completo de la línea (reescribir `product_id` recomputa los impuestos); 26.316 (`_meli_write_ml_line`, sólo lo que cambió) lo destapó. En el sync siguiente el `for tid` no itera y `if (tax_iva_id!=tid)` lee `tid` sin asignar (shipment.py; orders.py ya tenía `tid = None`).
@@ -1735,3 +1770,17 @@ no duplica, motivo fuera de lista, pack_splitted, by_reason+param = 1 devolució
 Fix 7/7 en 16-19; control origin 26.305 rojo en 02/03. Suites /meli_oerp,/accounting,/multiple,/stock: 0
 regresiones (preexistentes idénticas fix/ctl). Accounting: `tests/test_26306_sign_invoice.py` (regresión de
 meli_sign_invoice, fix de 26.302): 4/4; control accounting pre-302 ⇒ NameError: name 'config' is not defined.
+
+## 26.334 (28-oct-2026) — «Nueva Lista de Precios» ignorada al publicar + aviso de atributos faltantes
+**Causa:** `meli_oerp_multiple` `_product_post` llamaba a `set_meli_price(config)` sin la lista; en `meli_oerp`
+`set_meli_price` un `plist` explícito iba ÚLTIMO (`pl_usd or config.mercadolibre_pricelist or plist`) ⇒ nunca
+se usaba. `force_meli_new_pricelist` sólo llegaba al binding (`update_price`): en modo familia / sin binding
+(cuenta user_product_seller) el body salía con la lista de la cuenta y el binding mostraba la de la regla.
+Medido en un cliente: lista elegida ⇒ body 64.040 (lista de la cuenta) vs 70.436,52 (regla costo×2,2 + IVA).
+**Fix:** `set_meli_price`: `pl = plist or pl_usd or config.mercadolibre_pricelist` (nadie pasaba `plist`: sin
+cambio para el resto); `_product_post` pasa `plist=_meli_resolve_new_pricelist(force_meli_new_pricelist)`
+(record o id). Aviso del pre-flight: `_meli_missing_attributes_where` separa campo de la pestaña ML
+(BRAND/MODEL/SELLER_PACKAGE_*), Código de barras (GTIN) y línea en «Atributos y variantes» (resto).
+**Tests:** `meli_oerp_multiple/tests/test_26334_lista_ml_y_aviso_atributos.py` (tag meli_26334, 5 casos).
+Fix 5/5 en 16-19; control origin 26.333 en 18: 5 FAIL de 5. Suites /meli_oerp,/meli_oerp_multiple: 18 0/293,
+17 0/329, 19 0/280; 16 0F+3E/333 (test_meli_cancel: base sin plan contable, ajeno).

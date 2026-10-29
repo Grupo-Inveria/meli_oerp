@@ -306,12 +306,12 @@ class sale_order_line(models.Model):
         return res
 
     def _meli_refresh_shipping_invoice_qty(self):
-        """[158, 26.307] Deja la cantidad a facturar de la linea de envio en manos del compute.
+        """[caso-K02, 26.307] Deja la cantidad a facturar de la linea de envio en manos del compute.
 
         Antes shipment.py escribia `qty_to_invoice = pedida - facturada` DIRECTO cada vez que ML
         informaba un envio con precio, aunque el guard de venta facturada hubiera frenado el
-        cambio de precio: la linea quedaba en $0 con qty_to_invoice=1 / "A facturar" (158, SO
-        ML 2000019153738674, 25-oct). Un valor escrito a mano sobre un campo calculado no lo
+        cambio de precio: la linea quedaba en $0 con qty_to_invoice=1 / "A facturar" (caso-K02, SO
+        ML 2000424231350253, 25-oct). Un valor escrito a mano sobre un campo calculado no lo
         recalcula nadie hasta que cambie una dependencia.
 
         - Linea de envio ML (`_meli_is_ml_shipping_line`): NO se escribe; se pide el recompute de
@@ -345,8 +345,8 @@ class sale_order_line(models.Model):
         return sup() if sup else True
 
     # ------------------------------------------------------------------
-    # [#526, 26.316] Precio de la linea de PRODUCTO de una venta ML: lo manda ML.
-    # Medido en prod de Deco (27-oct, SO 13151 y 34 ventas mas desde el 19-oct): un campo
+    # [#caso-K15, 26.316] Precio de la linea de PRODUCTO de una venta ML: lo manda ML.
+    # Medido en prod de cliente E (27-oct, SO 11404 y 34 ventas mas desde el 19-oct): un campo
     # Studio del cliente (`x_studio_precio_por_medida`, depends product_id/ancho/largo) termina
     # su compute con `record['price_unit'] = <formula>`. Como la sincronizacion reescribia
     # `product_id` en CADA re-sync (aunque no cambiara), ese compute corria DENTRO del write del
@@ -385,8 +385,8 @@ class sale_order_line(models.Model):
         return upd
 
     # ------------------------------------------------------------------
-    # [26.326, regresion 26.316 — fix de referencia fork Deco #526 d3b7b4a] Impuestos de la linea de
-    # PRODUCTO de una venta ML. Medido en prod (28-oct, SO 13275, pack NUEVO): el bloque viejo comparaba
+    # [26.326, regresion 26.316 — fix de referencia fork cliente E #caso-K15 d3b7b4a] Impuestos de la linea de
+    # PRODUCTO de una venta ML. Medido en prod (28-oct, SO 12060, pack NUEVO): el bloque viejo comparaba
     # contra la compania de `sorder`, que en un pack nuevo esta vacio => quitaba el IVA correcto y no
     # agregaba ninguno. Hasta 26.315 lo tapaba el write completo (product_id recomputa los impuestos);
     # 26.316 (`_meli_write_ml_line`, solo lo que cambio) lo destapo: la linea quedaba sin IVA
@@ -412,7 +412,7 @@ class sale_order_line(models.Model):
         return True
 
     def _meli_write_ml_line(self, vals, config=None):
-        """Write de la linea de producto ML desde la sincronizacion (ver bloque [#526, 26.316])."""
+        """Write de la linea de producto ML desde la sincronizacion (ver bloque [#caso-K15, 26.316])."""
         for line in self:
             upd = line._meli_vals_changed(vals)
             if upd:
@@ -437,7 +437,7 @@ class sale_order_line(models.Model):
             after = float(line.price_unit or 0.0)
             ok = abs(after - float(price_unit)) <= 0.005
             restored = restored or ok
-            _logger.warning("MELI #526: %s linea %s (%s): el precio de ML %.6f quedo en %.6f despues del write "
+            _logger.warning("MELI #caso-K15: %s linea %s (%s): el precio de ML %.6f quedo en %.6f despues del write "
                             "(personalizacion que escribe price_unit): %s",
                             so.name, line.id, line.product_id.default_code or line.product_id.display_name,
                             float(price_unit), current, ok and "restituido" or "NO se pudo restituir (%.6f)" % after)
@@ -755,7 +755,7 @@ class sale_order(models.Model):
              "sistema 'meli_oerp.cancel_return_reasons' (por defecto: buyer_cancel_express, "
              "fraud), así que NO se creó la devolución de la mercadería ya entregada. "
              "Revisar si la mercadería volvió y, si corresponde, devolverla a mano.")
-    # 26.278 (#624): politica por motivo (meli_oerp.cancel_reason_policy=by_reason). ML canceló
+    # 26.278 (#caso-K04): politica por motivo (meli_oerp.cancel_reason_policy=by_reason). ML canceló
     # la orden pero el pago figura `bpp_covered`: el programa de proteccion de ML le pagó la venta
     # al vendedor (motivos E/F de la clienta) => venta CONCRETADA, no se cancela. La marca la saca
     # del filtro "Canceladas pendientes en Odoo" y del banner, y corta el reintento del cron.
@@ -765,11 +765,11 @@ class sale_order(models.Model):
              "por ejemplo 'Te dimos el dinero de la venta y reembolsamos al comprador' o 'Paquete no "
              "entregado. Te reembolsamos el monto'). Se mantiene como venta concretada: no se cancela "
              "ni se devuelve la mercadería.")
-    # 26.278 (#624): la actividad de revision se crea UNA vez por venta (aunque se marque hecha y
+    # 26.278 (#caso-K04): la actividad de revision se crea UNA vez por venta (aunque se marque hecha y
     # la venta siga abierta, el cron no la recrea en cada pasada).
     meli_cancel_review_scheduled = fields.Boolean(
         string='ML Revisión de cancelación agendada', copy=False, readonly=True)
-    # 26.171 (E2, 431): fecha de la cancelación en ML (`cancel_detail.date`) y la marca de
+    # 26.171 (E2, caso-K13): fecha de la cancelación en ML (`cancel_detail.date`) y la marca de
     # "cancelación retenida": ML la canceló ANTES de la fecha de corte configurada
     # ("Cancelaciones automáticas desde") y por eso NO se accionó automáticamente.
     meli_cancel_date = fields.Datetime(
@@ -814,7 +814,7 @@ class sale_order(models.Model):
     meli_receiver_zip_code = fields.Char(string="ML Receiver CP", related="meli_shipment.receiver_zip_code", store=True, index=True, readonly=True)
     meli_shipment_logistic_type = fields.Char(string="Logistic Type",index=True)
     meli_update_forbidden = fields.Boolean(string="Bloqueado para actualizar desde ML",default=False, index=True)
-    # [#513 TYL, 26.282] Ultimo contacto de factura / entrega que puso la SINCRONIZACION (no el usuario).
+    # [#caso-K03 cliente A, 26.282] Ultimo contacto de factura / entrega que puso la SINCRONIZACION (no el usuario).
     # Si el pedido tiene otro, se cambio a mano y la sincronizacion lo respeta.
     meli_partner_invoice_auto_id = fields.Many2one('res.partner', string="Factura puesta por ML",
         copy=False, readonly=True, ondelete='set null',
@@ -954,7 +954,7 @@ class sale_order(models.Model):
                 _logger.warning("MELI sync partner_shipping_id -> albaranes SO %s (id=%s): %s",
                                 order.name, order.id, e)
 
-    # [#513 TYL, 26.282] Direcciones del pedido: la sincronizacion las pone al crear o si estan
+    # [#caso-K03 cliente A, 26.282] Direcciones del pedido: la sincronizacion las pone al crear o si estan
     # vacias, y despues solo si siguen siendo las que puso ella. Un cambio manual se respeta.
     # Logica de decision pura en models/address_lock.py (tests/test_address_lock_pure.py).
     _MELI_ADDR_AUTO = {'partner_invoice_id': 'meli_partner_invoice_auto_id',
@@ -1009,7 +1009,7 @@ class sale_order(models.Model):
                     vals[auto_f] = ml_id
             elif decision == _meli_addr.MANUAL:
                 vals.pop(fname, None)
-                _logger.info("MELI #513 SO %s (id=%s): %s cambiado a mano (id=%s), no se reemplaza por id=%s",
+                _logger.info("MELI #caso-K03 SO %s (id=%s): %s cambiado a mano (id=%s), no se reemplaza por id=%s",
                              order.name, order.id, fname, cur.id, ml_id)
             if 'partner_id' in vals and fname not in vals and cur:
                 # partner_invoice_id / partner_shipping_id son compute sobre partner_id: si la
@@ -1133,7 +1133,7 @@ class sale_order(models.Model):
         return morders.filtered(lambda m: (m.status or '') != 'cancelled')
 
     def _meli_cancel_hold_partial_pack(self, cancel_msg, order_json=None, config=None):
-        """26.250 (#431 riesgo 3): ML canceló UNA orden de un carrito y otras siguen vigentes.
+        """26.250 (#caso-K13 riesgo 3): ML canceló UNA orden de un carrito y otras siguen vigentes.
         Antes se cancelaba la venta ENTERA (con devoluciones y facturas de las órdenes vivas).
         Ahora no se cancela: nota única en la venta. Cuando ML cancela la última orden viva, la
         venta sigue el camino de cancelación de siempre. pack_splitted y la acción manual quedan afuera.
@@ -1169,7 +1169,7 @@ class sale_order(models.Model):
         if len(morders) < 2 and str(self.meli_order_id or '') in ('', str(morders.order_id or '')):
             # 26.250: venta de UNA orden ML (no carrito): recibe el estado por su propio camino.
             # Un CARRITO con una sola orden (meli_order_id = pack_id) sí entra: orders_update_order_json
-            # no la encuentra por order_id y su meli_status no se escribía (#431, carritos 2026-09).
+            # no la encuentra por order_id y su meli_status no se escribía (#caso-K13, carritos 2026-09).
             return False
         if not all((m.status or '') == 'cancelled' for m in morders):
             return False
@@ -1476,7 +1476,7 @@ class sale_order(models.Model):
         return mode if mode in self._MELI_NO_STOCK_MODES else 'confirm'
 
     def _meli_is_dropship_line(self, line, product):
-        """Triangulación: referencia DSTR_ (convención de 431) o una ruta de la línea /
+        """Triangulación: referencia DSTR_ (convención de caso-K13) o una ruta de la línea /
         producto / categoría con una regla que entrega directo al cliente desde el
         proveedor (la ruta Dropship estándar: action 'buy' con destino cliente)."""
         if (product.default_code or '').upper().startswith('DSTR_'):
@@ -1851,7 +1851,7 @@ class sale_order(models.Model):
         mode = 'done'
         if config and 'mercadolibre_return_mode' in config._fields:
             mode = config.mercadolibre_return_mode or 'done'
-        # 26.278 (#624): la politica por motivo pide la devolucion SIN validar para las
+        # 26.278 (#caso-K04): la politica por motivo pide la devolucion SIN validar para las
         # mediaciones (se decide con la resolucion del reclamo). 'none' configurado manda.
         force = self.env.context.get('meli_return_mode_force')
         if force and mode != 'none':
@@ -2059,19 +2059,19 @@ class sale_order(models.Model):
         # FRESCA de ML (orden + pagos + envio) leida ANTES de escribir nada. Con 'legacy'
         # este metodo hace exactamente lo de siempre (salvo la parte 2: una factura ya
         # revertida por NC publicada deja de contar como "sin resolver").
-        # 26.171 (E2, 431): "Cancelaciones automáticas desde". Lo cancelado en ML ANTES de
+        # 26.171 (E2, caso-K13): "Cancelaciones automáticas desde". Lo cancelado en ML ANTES de
         # esa fecha no se acciona (ni devolución, ni factura, ni venta): queda retenido y a
         # mano. Va ANTES de los dos modos y antes de cualquier red o escritura.
         if self._meli_cancel_hold_by_cutoff(cancel_msg, order_json=order_json, config=config):
             return False
-        # 26.250 (#431): carrito con órdenes ML todavía vigentes ⇒ no se cancela la venta entera.
+        # 26.250 (#caso-K13): carrito con órdenes ML todavía vigentes ⇒ no se cancela la venta entera.
         if self._meli_cancel_hold_partial_pack(cancel_msg, order_json=order_json, config=config):
             return False
 
         if self._meli_cancel_mode(config) == 'por_estado_ml':
             return self._meli_cancel_por_estado_ml(cancel_msg, order_json=order_json, meli=meli, config=config)
 
-        # 26.278 (#624): politica por MOTIVO (opt-in: meli_oerp.cancel_reason_policy=by_reason).
+        # 26.278 (#caso-K04): politica por MOTIVO (opt-in: meli_oerp.cancel_reason_policy=by_reason).
         # bool => resultado final; dict => sigue el camino legacy con ese contexto; None => este
         # motivo no lo maneja la politica. Ver _meli_cancel_by_reason y models/cancel_decision.py.
         if self._meli_cancel_policy_on() and not self.env.context.get('meli_cancel_policy_applied'):
@@ -2081,7 +2081,7 @@ class sale_order(models.Model):
             if isinstance(policy, dict):
                 self = self.with_context(meli_cancel_policy_applied=True, **policy)
 
-        # 26.171 (E3, 431): pack dividido por ML (pack_splitted) en el modo legacy. Misma
+        # 26.171 (E3, caso-K13): pack dividido por ML (pack_splitted) en el modo legacy. Misma
         # regla que `por_estado_ml` (pago acreditado sin reintegro): ML re-creó la venta con
         # otro número, la mercadería y la plata siguen con la gemela => nunca devolución ni
         # nota de crédito automática.
@@ -2089,12 +2089,19 @@ class sale_order(models.Model):
                 not self.env.context.get('meli_cancel_pack_split_return'):
             return self._meli_cancel_pack_splitted_legacy(cancel_msg, config=config)
 
+        # 26.335 (29-oct-2026): GUARDA de entrega / cobro del modo legacy. Ver
+        # cancel_decision.legacy_cancel_block_reason. Va DESPUES de pack_splitted (su pago
+        # acreditado es de la venta gemela: regla propia) y de la politica por motivo (que ya
+        # decidio con el status_detail del pago), y ANTES de tocar stock o facturas.
+        if self._meli_cancel_hold_delivered_or_paid(cancel_msg, order_json=order_json, config=config):
+            return False
+
         # 1. Devolver albaranes ya entregados
         # _meli_return_done_pickings usa hasattr para compatibilidad Odoo 16/17/18
         # (action_create_returns / create_returns) y evita crear devoluciones duplicadas.
         # 26.221: solo si el motivo de ML esta en meli_oerp.cancel_return_reasons; si no,
         # la venta se cancela igual (pasos 2-5) pero SIN devolucion, y queda marcada.
-        # 26.278 (#624): mediacion => la devolucion se crea DESPUES de cancelar la venta (si se
+        # 26.278 (#caso-K04): mediacion => la devolucion se crea DESPUES de cancelar la venta (si se
         # crea antes queda sin validar y la cascada de action_cancel la cancela). Ver
         # _meli_cancel_after_legacy.
         if not self.env.context.get('meli_cancel_return_draft_review'):
@@ -2266,7 +2273,7 @@ class sale_order(models.Model):
         return True
 
     # ------------------------------------------------------------------ #
-    #  26.171 (E2, 431): "Cancelaciones automáticas desde"                 #
+    #  26.171 (E2, caso-K13): "Cancelaciones automáticas desde"                 #
     # ------------------------------------------------------------------ #
     # Al subir a una versión que acciona las cancelaciones, el barrido de estados drena
     # TODO el atraso (3152 canceladas en ML abiertas en Odoo, 1806 con salida hecha)
@@ -2338,6 +2345,69 @@ class sale_order(models.Model):
             config=config, once_key="cancel-held-%s-%s" % (self.id, fields.Datetime.to_string(cutoff)))
         return True
 
+    def _meli_cancel_guard_inputs(self, order_json=None):
+        """26.335: (envio, pagos) para cancel_decision.legacy_cancel_block_reason.
+
+        Envio: el dato LOCAL (sin red: este camino corre dentro de la transaccion del cron y
+        en el barrido offline). `delivered` es confiable aunque el envio casi nunca se
+        refresque: el estado solo avanza. Pagos: los de `order_json` (foto fresca) cuando el
+        llamador la trae; si no, los locales, y SOLO cuentan si se modificaron despues de la
+        cancelacion (si no, pueden estar viejos: un reintegro posterior no se ve)."""
+        self.ensure_one()
+        morders = self._meli_sale_ml_orders()
+        ship = self.meli_shipment if 'meli_shipment' in self._fields else False
+        if not ship:
+            ship = morders.mapped('shipment')[:1]
+        shipment = None
+        if ship:
+            shipment = {'id': ship.shipping_id or '', 'status': ship.status or '',
+                        'substatus': ship.substatus or ''}
+        payments = []
+        if isinstance(order_json, dict) and 'payments' in order_json:
+            for pay in (order_json.get('payments') or []):
+                payments.append({
+                    'id': str(pay.get('id') or ''), 'status': pay.get('status') or '',
+                    'status_detail': pay.get('status_detail') or '',
+                    'refunded': _meli_cd._payment_refunded(pay), 'fresh': True,
+                })
+        else:
+            cancel_date = self.meli_cancel_date
+            for pay in morders.mapped('payments'):
+                payments.append({
+                    'id': pay.payment_id or '', 'status': pay.status or '', 'status_detail': '',
+                    'refunded': 0.0,
+                    'fresh': bool(cancel_date and pay.date_last_modified
+                                  and pay.date_last_modified >= cancel_date),
+                })
+        return shipment, payments
+
+    def _meli_cancel_hold_delivered_or_paid(self, cancel_msg, order_json=None, config=None):
+        """26.335 (29-oct-2026): ML dice `cancelled` pero el envio esta ENTREGADO o el pago
+        sigue ACREDITADO al vendedor => NO se cancela la venta (ni devolucion, ni factura):
+        queda retenida (meli_cancel_held) con una nota unica. La accion manual 'procesar
+        cancelacion' la fuerza (contexto meli_cancel_ignore_delivered_guard).
+        :return: True si retuvo (no hay que cancelar)."""
+        self.ensure_one()
+        ctx = self.env.context
+        if ctx.get('meli_cancel_ignore_delivered_guard') or ctx.get('meli_cancel_policy_applied'):
+            return False
+        shipment, payments = self._meli_cancel_guard_inputs(order_json=order_json)
+        reason = _meli_cd.legacy_cancel_block_reason(shipment, payments)
+        if not reason:
+            return False
+        _logger.warning("meli_cancel %s: NO cancelada — %s. Queda retenida para decisión manual "
+                        "(MELI_CANCEL_HOLD_DELIVERED).", self.name, reason)
+        if 'meli_cancel_held' in self._fields and not self.meli_cancel_held:
+            self.meli_cancel_held = True
+        meli_message_post(
+            self,
+            "MercadoLibre informa la orden cancelada, pero %s. No se canceló la venta, ni se creó "
+            "la devolución, ni se tocó la factura: puede ser una venta concretada o en reclamo. "
+            "Revisar en MercadoLibre y, si corresponde, usar la acción 'MercadoLibre: procesar "
+            "cancelación'. Motivo ML: %s" % (reason, cancel_msg),
+            config=config, once_key="cancel-hold-delivered-%s" % self.id)
+        return True
+
     def action_meli_cancel_process_held(self):
         """Acción manual: procesa la cancelación de ML de las ventas seleccionadas como lo
         haría el cron, IGNORANDO 'Cancelaciones automáticas desde'."""
@@ -2346,14 +2416,15 @@ class sale_order(models.Model):
             cancel_msg = "Orden cancelada por MercadoLibre."
             if so.meli_status_detail:
                 cancel_msg += " Motivo: %s" % so.meli_status_detail
-            so.with_context(meli_cancel_ignore_cutoff=True, meli_cancel_ignore_partial_pack=True).meli_cancel_with_detail(cancel_msg)
+            so.with_context(meli_cancel_ignore_cutoff=True, meli_cancel_ignore_partial_pack=True,
+                            meli_cancel_ignore_delivered_guard=True).meli_cancel_with_detail(cancel_msg)
             if so.state == 'cancel':
                 so.meli_cancel_held = False
                 done += 1
         return done
 
     # ------------------------------------------------------------------ #
-    #  26.171 (E3, 431): pack_splitted en el modo legacy                   #
+    #  26.171 (E3, caso-K13): pack_splitted en el modo legacy                   #
     # ------------------------------------------------------------------ #
     def _meli_cancel_is_pack_splitted(self, order_json=None):
         self.ensure_one()
@@ -2382,7 +2453,7 @@ class sale_order(models.Model):
                 self.meli_cancel_decision = text
             meli_message_post(self, "⚠️ ACCIÓN REQUERIDA (cancelación de ML): %s Motivo ML: %s" % (text, cancel_msg),
                               config=config, once_key="cancel-packsplit-%s" % self.id)
-            # 26.278 (#624): con la politica por motivo, ademas una actividad (el aviso que se
+            # 26.278 (#caso-K04): con la politica por motivo, ademas una actividad (el aviso que se
             # ve en el tablero). Sin devolucion automatica: decision del coordinador (la gemela
             # sigue viva). Si la gemela tiene su propia salida, la de esta venta sobra.
             if self._meli_cancel_policy_on():
@@ -2398,7 +2469,7 @@ class sale_order(models.Model):
         return self._meli_cancel_finish(cancel_msg)
 
     # ------------------------------------------------------------------ #
-    #  26.278 (#624): politica por MOTIVO de cancelacion (opt-in)          #
+    #  26.278 (#caso-K04): politica por MOTIVO de cancelacion (opt-in)          #
     # ------------------------------------------------------------------ #
     # Tabla A-F y medicion en models/cancel_decision.py (classify_cancel_reason). Solo modo
     # 'legacy': 'por_estado_ml' decide con su propia matriz.
@@ -2448,7 +2519,7 @@ class sale_order(models.Model):
 
     def _meli_pack_splitted_twins(self):
         """Ventas de Odoo que ML creó al dividir el pack: mismo comprador, algún ítem en común,
-        no canceladas, creadas desde la orden original. (#624, medido: la gemela llega con tag
+        no canceladas, creadas desde la orden original. (#caso-K04, medido: la gemela llega con tag
         splitted_order segundos después de la cancelación y genera SU PROPIA salida.)"""
         self.ensure_one()
         mine = self.meli_orders or self.meli_order
@@ -2483,7 +2554,7 @@ class sale_order(models.Model):
         return "; venta gemela: %s" % "; ".join(parts)
 
     def _meli_cancel_by_reason(self, cancel_msg, order_json=None, meli=None, config=None):
-        """Politica por motivo (#624).
+        """Politica por motivo (#caso-K04).
         :return: bool = resultado final (True si la venta quedó cancelada); dict = contexto
                  con el que sigue el camino legacy; None = el motivo no lo maneja la politica."""
         self.ensure_one()
@@ -2510,7 +2581,7 @@ class sale_order(models.Model):
         if reason == _meli_cd.REASON_DEFAULT:
             return None
         if reason == _meli_cd.REASON_PACK_SPLIT:
-            # 26.288 (#624): medido en un cliente -- la gemela del split trae SU PROPIA salida
+            # 26.288 (#caso-K04): medido en un cliente -- la gemela del split trae SU PROPIA salida
             # hecha; sin devolver la de esta venta la mercaderia sale dos veces. Gemela en Odoo
             # con salida propia 'done' => se devuelve la salida de esta venta (como A/B). Sin
             # gemela o gemela sin salida propia => como antes: nota + actividad, sin devolver.
@@ -2754,13 +2825,13 @@ class sale_order(models.Model):
         # meli_oerp_multiple/models/connection_configuration.py y DEBE declarar
         # el MISMO default.
         config = self._meli_cancel_config(config)
-        # 26.171 (E3, 431): envío FULL => el stock lo gestiona MercadoLibre en su fulfillment.
+        # 26.171 (E3, caso-K13): envío FULL => el stock lo gestiona MercadoLibre en su fulfillment.
         # Nunca devolución automática a un almacén propio (en 18/19 el guard de "sin
         # cantidades" NO las salteaba: mira la cantidad ENTREGADA, que es > 0). Es lo que ya
         # decidía `por_estado_ml` (SHIP_FULFILLMENT => no mover stock) y lo que dice la ayuda.
-        # 26.278 (#624): con la politica por motivo y meli_oerp.cancel_return_full=1 el cliente
+        # 26.278 (#caso-K04): con la politica por motivo y meli_oerp.cancel_return_full=1 el cliente
         # lleva el stock del deposito FULL en Odoo: la devolucion vuelve a la ubicacion de origen.
-        # 26.306 (#607): el parametro vale SOLO, tambien en modo legacy (sin by_reason). Sin el
+        # 26.306 (#caso-K16): el parametro vale SOLO, tambien en modo legacy (sin by_reason). Sin el
         # parametro en 1 nada cambia. Siguen mandando cancel_return_reasons, pack_splitted y
         # mercadolibre_return_mode, y el chequeo de "ya devuelta" evita duplicar.
         full_return = self.env.context.get('meli_cancel_return_full') or self._meli_cancel_return_full_on()
@@ -3053,7 +3124,7 @@ class sale_order(models.Model):
                 return {'error': serror}
 
             if (self.state in ['draft']):
-                # 26.171 (E4, 431): el cron reintenta la confirmación cada ~10 min mientras la
+                # 26.171 (E4, caso-K13): el cron reintenta la confirmación cada ~10 min mientras la
                 # venta siga en cotización (p.ej. sin existencia) y este aviso se repetía en
                 # CADA pasada (prod de un cliente: 4 veces en 25 min en la misma venta). Una vez por venta.
                 if not self._meli_ready_note_posted():
@@ -3714,6 +3785,36 @@ class mercadolibre_orders(models.Model):
 
         return updated
 
+    def _meli_receiver_from_shipment(self, Shipment):
+        """[#696] receiver_address armado desde el envio ya guardado (mismo formato que el JSON de ML).
+
+        Antes no llevaba `zip_code`: en cada import el contacto de ENTREGA se escribia con CP vacio
+        (partner_delivery_id) y, en la misma vuelta, el camino de packs de shipment.py lo volvia a escribir
+        con el CP del JSON. Dos cambios reales de direccion por import = dos mensajes de seguimiento
+        (contact_address_inline) en el contacto, en cada resync.
+        """
+        return {
+            'receiver_address': Shipment.receiver_address_line,
+            'address_line': Shipment.receiver_address_line,
+            'receiver_name': Shipment.receiver_address_name,
+            'receiver_phone': Shipment.receiver_address_phone,
+            'zip_code': Shipment.receiver_zip_code or '',
+            'street_name': Shipment.receiver_street_name,
+            'street_number': Shipment.receiver_street_number,
+            'country': {
+                'id': Shipment.receiver_country_code,
+                'name': Shipment.receiver_country
+            },
+            'state': {
+                'name': Shipment.receiver_state,
+                'id': Shipment.receiver_state_code
+            },
+            'city': {
+                'name': Shipment.receiver_city,
+                'id': Shipment.receiver_city_code
+            }
+        }
+
     def street(self, Receiver={}, Buyer={} ):
         full_street = 'no street'
         if (Receiver and 'address_line' in Receiver):
@@ -3788,6 +3889,124 @@ class mercadolibre_orders(models.Model):
             country_id = company.country_id and company.country_id.id
 
         return country_id
+
+    # ------------------------------------------------------------------------------------------
+    # Direccion del contacto de facturacion: TODA de la misma fuente (billing_info).
+    # Antes street/city/zip salian de billing_info y el estado del ENVIO: state() devuelve el del
+    # receiver apenas matchea su codigo, sin mirar STATE_NAME. Resultado: un domicilio fiscal que no
+    # existe (calle de Monterrey en Jalisco) en el CFDI (MX) o la provincia de la factura (AR).
+    # ------------------------------------------------------------------------------------------
+    def _meli_state_by_code_or_name(self, country_id, code=None, name=None):
+        """res.country.state por codigo exacto (acepta 'MX-YUC' / 'YUC' / 'CMX') o por nombre. Nunca con
+        un valor vacio: `name ilike ''` matchea TODOS los estados y devolvia el primero del pais."""
+        State = self.env['res.country.state']
+        if not country_id:
+            return False
+        code = str(code or '').strip()
+        if code:
+            for cand in (code, code.split('-')[-1]):
+                st = cand and State.search([('code', '=ilike', cand), ('country_id', '=', country_id)], limit=1)
+                if st:
+                    return st.id
+        name = str(name or '').strip()
+        if name:
+            if name == "Capital Federal":
+                name = "Ciudad Autónoma de Buenos Aires"
+            st = State.search([('name', '=ilike', name), ('country_id', '=', country_id)], limit=1)
+            if not st:
+                st = State.search([('name', 'ilike', name), ('country_id', '=', country_id)])
+                st = st if len(st) == 1 else State
+            if st:
+                return st.id
+        return False
+
+    def _meli_billing_state_id(self, country_id, binfo, zip_code='', city='', Receiver=None):
+        """Estado de facturacion SOLO desde datos de facturacion.
+        1) codigo/nombre que trae billing_info; 2) res.city por CP (base_address_extended);
+        3) mismo CP que el envio => mismo lugar => estado del envio (deducido por CP, no mezclado);
+        4) AR: primera letra del CPA = codigo de provincia; 5) res.city por nombre, si es de UN solo estado.
+        Si nada alcanza: False (vacio). Nunca el estado del envio a secas."""
+        if not country_id:
+            return False
+        address = binfo.get('address') if isinstance(binfo.get('address'), dict) else {}
+        st_v2 = address.get('state') if isinstance(address.get('state'), dict) else {}
+        state_id = self._meli_state_by_code_or_name(
+            country_id,
+            code=binfo.get('STATE_CODE') or binfo.get('STATE_ID') or st_v2.get('code') or st_v2.get('id'),
+            name=binfo.get('STATE_NAME') or st_v2.get('name'))
+        if state_id:
+            return state_id
+        zip_code = str(zip_code or '').strip()
+        City = 'res.city' in self.env and self.env['res.city']
+        if zip_code and City is not False and 'zipcode' in City._fields:
+            states = City.search([('zipcode', '=', zip_code), ('country_id', '=', country_id)]).mapped('state_id')
+            if len(states) == 1:
+                return states.id
+        if zip_code and Receiver and isinstance(Receiver, dict):
+            r_zip = str(Receiver.get('zip_code') or '').strip()
+            if r_zip and r_zip == zip_code:
+                r_state = Receiver.get('state') if isinstance(Receiver.get('state'), dict) else {}
+                state_id = self._meli_state_by_code_or_name(country_id, code=r_state.get('id'), name=r_state.get('name'))
+                if state_id:
+                    return state_id
+        country = self.env['res.country'].browse(country_id)
+        if zip_code and country.code == 'AR' and zip_code[:1].isalpha():
+            state_id = self._meli_state_by_code_or_name(country_id, code=zip_code[:1].upper())
+            if state_id:
+                return state_id
+        city = str(city or '').strip()
+        if city and City is not False:
+            states = City.search([('name', '=ilike', city), ('country_id', '=', country_id)]).mapped('state_id')
+            if len(states) == 1:
+                return states.id
+        return False
+
+    def _meli_billing_address_vals(self, Receiver=None, Buyer=None):
+        """Direccion de facturacion, toda desde billing_info. {} si billing_info no trae direccion.
+        Sin claves vacias: un dato ausente no borra lo guardado (mismo criterio que #696)."""
+        binfo = (Buyer and isinstance(Buyer, dict) and Buyer.get('billing_info')) or {}
+        if not isinstance(binfo, dict):
+            return {}
+        address = binfo.get('address') if isinstance(binfo.get('address'), dict) else {}
+        street_name = str(binfo.get('STREET_NAME') or address.get('street_name') or '').strip()
+        street_number = str(binfo.get('STREET_NUMBER') or address.get('street_number') or '').strip()
+        city = str(binfo.get('CITY_NAME') or address.get('city_name') or '').strip()
+        zip_code = str(binfo.get('ZIP_CODE') or address.get('zip_code') or '').strip()
+        st_v2 = address.get('state') if isinstance(address.get('state'), dict) else {}
+        has_state = bool(binfo.get('STATE_NAME') or binfo.get('STATE_CODE') or st_v2.get('code') or st_v2.get('name'))
+        if not (street_name or city or zip_code or has_state):
+            return {}
+        country_id = False
+        b_country = str(binfo.get('COUNTRY_ID') or address.get('country_id') or '').strip()
+        if b_country:
+            country = self.env['res.country'].search([('code', '=ilike', b_country)], limit=1)
+            country_id = country.id
+        if not country_id:
+            # el pais del sitio de ML (el del envio o el de la compania): mismo pais, no mezcla de domicilio
+            country_id = self.country(Receiver=Receiver, Buyer=Buyer)
+        vals = {
+            'street': (street_name + ' ' + street_number).strip(),
+            'city': city,
+            'zip': zip_code,
+            'country_id': country_id,
+            'state_id': self._meli_billing_state_id(country_id, binfo, zip_code=zip_code, city=city, Receiver=Receiver),
+        }
+        return {k: v for k, v in vals.items() if v}
+
+    def _meli_partner_address_vals(self, Receiver=None, Buyer=None):
+        """Direccion para un contacto: la de facturacion entera si billing_info la trae; si no, la del envio
+        entera (como antes). Nunca campos de una fuente mezclados con los de la otra."""
+        vals = self._meli_billing_address_vals(Receiver=Receiver, Buyer=Buyer)
+        if vals:
+            return vals
+        country_id = self.country(Receiver=Receiver)
+        return {
+            'street': self.street(Receiver),
+            'city': self.city(Receiver),
+            'country_id': country_id,
+            'state_id': self.state(country_id, Receiver),
+            'zip': (Receiver and isinstance(Receiver, dict) and str(Receiver.get('zip_code') or '').strip()) or '',
+        }
 
     def buyer_additional_info(self, billing_info={} ):
         ret = {}
@@ -4135,7 +4354,7 @@ class mercadolibre_orders(models.Model):
         return billinginfo
 
     def _meli_phone_mobile_vals( self, phone, partner=None ):
-        """[#682] Valores de telefono para un contacto que escribe el conector: `phone` y tambien `mobile`
+        """[#caso-K17] Valores de telefono para un contacto que escribe el conector: `phone` y tambien `mobile`
         (el modulo de WhatsApp/SMS del cliente lee `mobile`; antes solo se escribia `phone`).
         `mobile` se escribe si el campo existe (Odoo 19 lo elimino de res.partner) y el contacto no tiene
         un mobile propio: vacio o igual al phone actual (es la copia que hizo el conector). Un mobile
@@ -4208,8 +4427,8 @@ class mercadolibre_orders(models.Model):
             seller_in_price = 0.0
             for detail in rjson.get('details', []):
                 _is_coupon = str(detail.get('type') or '').lower() == 'coupon'
-                # [529] (19-oct-2026, landeo 26.287) type "discount" = oferta de PRECIO financiada por el
-                # vendedor: ML ya la descuenta del unit_price (Kindon 2000019046887762: lista 55.000, oferta
+                # [caso-K11] (19-oct-2026, landeo 26.287) type "discount" = oferta de PRECIO financiada por el
+                # vendedor: ML ya la descuenta del unit_price (producto 1 2000042250149300: lista 55.000, oferta
                 # 687,50, unit_price 54.312,50). Restarla otra vez dejaba la venta 689,56 por debajo de lo
                 # cobrado. Solo cuenta lo que NO esta en el precio (cupon del vendedor, etc.).
                 _in_price = (str(detail.get('type') or '').lower() == 'discount')
@@ -4250,7 +4469,7 @@ class mercadolibre_orders(models.Model):
         self.discount_seller_amount = seller_total
 
     def _meli_adopt_unlinked_sale_line(self, sorder, line_fields):
-        """26.250 (#431 bug 6): adoptar la línea del MISMO producto que no tiene vínculo con ML.
+        """26.250 (#caso-K13 bug 6): adoptar la línea del MISMO producto que no tiene vínculo con ML.
 
         Al cancelar y volver a confirmar una venta a mano (o al editarla en cotización) la línea
         que queda la crea el usuario y NO tiene `meli_order_item_id`. La sincronización la buscaba
@@ -4284,7 +4503,7 @@ class mercadolibre_orders(models.Model):
         return line
 
     def _meli_note_line_not_added(self, sorder, line_fields, config=None):
-        """26.250 (#431 bug 6): control visible cuando la sincronización NO agrega una línea a una
+        """26.250 (#caso-K13 bug 6): control visible cuando la sincronización NO agrega una línea a una
         venta confirmada. Una nota por item (once_key): el usuario ve que ML informa un item que la
         venta no tiene vinculado, en vez de que aparezca una línea nueva sin aviso."""
         _item = line_fields.get('meli_order_item_id')
@@ -4296,7 +4515,7 @@ class mercadolibre_orders(models.Model):
 
     @api.model
     def _meli_pack_seller_discount(self, pack_orders):
-        """26.318 (#431 B) descuento del VENDEDOR de un pack/carrito y su base de prorrateo.
+        """26.318 (#caso-K13 B) descuento del VENDEDOR de un pack/carrito y su base de prorrateo.
 
         Devuelve (descuento, bruto):
           descuento = suma de `discount_seller_amount` de las órdenes miembro (cada una lo trae de SU
@@ -4335,7 +4554,7 @@ class mercadolibre_orders(models.Model):
         (packs: una orden = un ítem) el ítem lleva todo el descuento, como antes.
         """
         order = self
-        # 26.318 (#431 B): `seller_discount` explícito = descuento del PACK (lo prorratea items_total).
+        # 26.318 (#caso-K13 B): `seller_discount` explícito = descuento del PACK (lo prorratea items_total).
         if seller_discount is None:
             seller_discount = float(order.discount_seller_amount or 0)
         seller_discount = float(seller_discount or 0.0)
@@ -4548,7 +4767,7 @@ class mercadolibre_orders(models.Model):
                 product_related = product_obj.search([('meli_id','=', meli_id)]
                                                       +company_domain)
 
-        # [#543] Respaldo por TOKEN del SKU (mercadolibre_sku_token_match): ultimo recurso,
+        # [#caso-K10] Respaldo por TOKEN del SKU (mercadolibre_sku_token_match): ultimo recurso,
         # despues de SKU exacto, barcode y meli_id. Apagado = no hace nada.
         if (not product_related and meli_seller_sku):
             product_related = product_obj._meli_sku_token_resolve( meli_seller_sku, config or company, company_domain )
@@ -4798,7 +5017,7 @@ class mercadolibre_orders(models.Model):
 
         #_logger.info(orders_update_order_json > data "+str(data['id']) + " json:" + str(data['order_json']['id']) )
 
-        # #431: UNA orden (o carrito) se importa una sola vez aunque la traigan dos procesos a la vez
+        # #caso-K13: UNA orden (o carrito) se importa una sola vez aunque la traigan dos procesos a la vez
         # (barrido del cron de ordenes + notificaciones). Lock por pack/orden y, bajo el lock, ¿ya la
         # commiteo otro despues de nuestro snapshot? ⇒ se saltea. Ver models/import_lock.py.
         _ml_oid = order_json.get("id")
@@ -4845,7 +5064,7 @@ class mercadolibre_orders(models.Model):
             #    sorder = saleorder_obj.browse(sorder_s[0] )
 
         if (sorder and sorder.meli_update_forbidden):
-            # 26.309 (158): freno sin escritura. WARNING una vez por venta (era ERROR en cada
+            # 26.309 (caso-K02): freno sin escritura. WARNING una vez por venta (era ERROR en cada
             # llamada) + marca para que la notificacion se cierre sin reintentar.
             meli_log_update_forbidden(_logger, sorder, " (orden ML %s)" % order_json.get("id"))
             return {'error': 'Forbidden to upate by meli_oerp', 'meli_update_forbidden': True}
@@ -4857,8 +5076,8 @@ class mercadolibre_orders(models.Model):
 
         partner_id = False
         partner_shipping_id = False
-        partner_invoice_id = False  # #601: si la orden llega sin buyer no se asignaba y abortaba en la asignación de contactos
-        buyer_id = False  # #542-661: definido siempre; se vincula a la orden también cuando la orden es NUEVA
+        partner_invoice_id = False  # #caso-K18: si la orden llega sin buyer no se asignaba y abortaba en la asignación de contactos
+        buyer_id = False  # #caso-K14-K19: definido siempre; se vincula a la orden también cuando la orden es NUEVA
         _mx_cfdi_billing_info = {}  # MLM: regimen / uso de CFDI de billing-info (ver _meli_mx_apply_cfdi)
         _mx_cfdi_new_partner_ids = set()  # contactos creados en ESTA importacion (el dato de ML manda)
 
@@ -4866,7 +5085,7 @@ class mercadolibre_orders(models.Model):
             #_logger.info("Buyer not present, fetch order")
             response = meli.get("/orders/"+str(order_json['id']), {'access_token':meli.access_token})
             order_json = response.json()
-            # #542-661: los módulos que heredan este método y post-procesan después de super()
+            # #caso-K14-K19: los módulos que heredan este método y post-procesan después de super()
             # leen data['order_json']: tiene que ser el mismo que se usó en esta importación.
             if isinstance(data, dict):
                 data['order_json'] = order_json
@@ -4902,7 +5121,7 @@ class mercadolibre_orders(models.Model):
 
             Buyer['billing_info'] = self.get_billing_info(order_id=order_json['id'],meli=meli,data=order_json)
             _mx_cfdi_billing_info = Buyer['billing_info'] or {}
-            _logger.info("BUYER_DATA: order=%s buyer_id=%s billing_info_keys=%s doc_type=%s doc_number=%s",
+            _logger.debug("BUYER_DATA: order=%s buyer_id=%s billing_info_keys=%s doc_type=%s doc_number=%s",
                          order_json.get('id','?'), _buyer_id_raw,
                          list(Buyer.get('billing_info', {}).keys()),
                          Buyer.get('billing_info', {}).get('doc_type', 'N/A'),
@@ -4937,24 +5156,7 @@ class mercadolibre_orders(models.Model):
                     Shipment = self.env["mercadolibre.shipment"].search([('shipping_id','=',order_json['shipping']["id"])],limit=1)
                     #_logger.info("Shipment:"+str(Shipment))
                     if (len(Shipment)==1):
-                        Receiver = {
-                            'receiver_address': Shipment.receiver_address_line,
-                            'address_line': Shipment.receiver_address_line,
-                            'receiver_name': Shipment.receiver_address_name,
-                            'receiver_phone': Shipment.receiver_address_phone,
-                            'country': {
-                                'id': Shipment.receiver_country_code,
-                                'name': Shipment.receiver_country
-                            },
-                            'state': {
-                                'name': Shipment.receiver_state,
-                                'id': Shipment.receiver_state_code
-                            },
-                            'city': {
-                                'name': Shipment.receiver_city,
-                                'id': Shipment.receiver_city_code
-                            }
-                        }
+                        Receiver = self._meli_receiver_from_shipment(Shipment)
                     else:
                         shipres = meli.get("/shipments/"+ str(order_json['shipping']['id']),  {'access_token':meli.access_token })
                         if shipres:
@@ -4965,13 +5167,16 @@ class mercadolibre_orders(models.Model):
             #_logger.info(order_json)
             #_logger.info("Buyer:"+str(Buyer) )
             #_logger.info("Receiver:"+str(Receiver) )
+            # Direccion de UNA sola fuente: facturacion entera o envio entero (nunca el estado del envio
+            # con la calle de facturacion). Ver _meli_partner_address_vals.
+            _meli_addr = self._meli_partner_address_vals(Receiver, Buyer)
             meli_buyer_fields = {
                 'name': self.buyer_full_name(Buyer),
-                'street': self.street(Receiver,Buyer),
-                'city': self.city(Receiver,Buyer),
-                'country_id': self.country(Receiver,Buyer),
-                'state_id': self.state(self.country(Receiver,Buyer),Receiver,Buyer),
-                'zip': self.zip_code(Receiver,Buyer),
+                'street': _meli_addr.get('street', ''),
+                'city': _meli_addr.get('city', ''),
+                'country_id': _meli_addr.get('country_id') or self.country(Receiver,Buyer),
+                'state_id': _meli_addr.get('state_id', False),
+                'zip': _meli_addr.get('zip', ''),
                 'phone': self.full_phone( Buyer ),
                 #'email': Buyer['email'],
                 'meli_buyer_id': Buyer['id'],
@@ -5118,7 +5323,7 @@ class mercadolibre_orders(models.Model):
                             'SUJETO EXENTO': 4,
                             'RESPONSABLE MONOTRIBUTO': 6,
                             'MONOTRIBUTO': 6,
-                            # #542-661: informado por ML => dato explícito (corrige un valor previo)
+                            # #caso-K14-K19: informado por ML => dato explícito (corrige un valor previo)
                             'CONSUMIDOR FINAL': 5,
                         }
                         if _taxpayer_upper and _taxpayer_upper in _afip_code_map:
@@ -5627,18 +5832,13 @@ class mercadolibre_orders(models.Model):
                 if _bf in BILLING_ONLY_FIELDS or _bf.startswith('fe_'):
                     billing_child_fields[_bf] = meli_buyer_fields.pop(_bf)
             billing_child_fields['name'] = billing_full_name
-            _logger.info("BILLING_SPLIT: billing_child_fields=%s | buyer_fields_remaining=%s",
+            _logger.debug("BILLING_SPLIT: billing_child_fields=%s | buyer_fields_remaining=%s",
                          list(billing_child_fields.keys()), list(meli_buyer_fields.keys()))
 
             # Dirección de facturación (va al contacto hijo)
+            # Toda desde billing_info (calle, ciudad, CP, pais Y estado): ver _meli_billing_address_vals.
             if ("billing_info_street_name" in buyer_fields and buyer_fields["billing_info_street_name"]):
-                billing_child_fields.update({
-                    'street': self.street(Receiver, Buyer),
-                    'city': self.city(Receiver, Buyer),
-                    'country_id': self.country(Receiver, Buyer),
-                    'state_id': self.state(self.country(Receiver, Buyer), Receiver, Buyer),
-                    'zip': self.zip_code(Receiver, Buyer),
-                })
+                billing_child_fields.update(self._meli_billing_address_vals(Receiver, Buyer))
 
             if ("fe_regimen_fiscal" in self.env['res.partner']._fields):
                 billing_child_fields['fe_regimen_fiscal'] = '49'
@@ -5695,7 +5895,7 @@ class mercadolibre_orders(models.Model):
                         # (meli_buyer_id, active, company_id), se revierte SOLO este create
                         # y la transacción del batch sigue sana (no se abortan las demás órdenes).
                         with self.env.cr.savepoint():
-                            # [#682] el contacto nace con el telefono en phone Y mobile
+                            # [#caso-K17] el contacto nace con el telefono en phone Y mobile
                             partner_id = respartner_obj.create(dict(meli_buyer_fields, **self._meli_phone_mobile_vals(meli_buyer_fields.get('phone'))))
                             _mx_cfdi_new_partner_ids.add(partner_id.id)
                             partner_id.flush_recordset()  # forzar el INSERT dentro del savepoint
@@ -5717,17 +5917,18 @@ class mercadolibre_orders(models.Model):
             elif ("meli_update_forbidden" in partner_id._fields and not partner_id.meli_update_forbidden):
                 # Actualizar contacto principal: solo campos de identidad, NO nombre ni datos fiscales
                 parent_update = {}
-                if not partner_id.country_id:
-                    parent_update['country_id'] = self.country(Receiver, Buyer)
-                if not partner_id.state_id:
-                    parent_update['state_id'] = self.state(self.country(Receiver, Buyer), Receiver, Buyer)
-                if not partner_id.street or partner_id.street == "no street":
-                    parent_update['street'] = self.street(Receiver, Buyer)
-                if not partner_id.city or partner_id.city == "":
-                    parent_update['city'] = self.city(Receiver, Buyer)
+                _meli_addr = self._meli_partner_address_vals(Receiver, Buyer)  # una sola fuente
+                if not partner_id.country_id and _meli_addr.get('country_id'):
+                    parent_update['country_id'] = _meli_addr['country_id']
+                if not partner_id.state_id and _meli_addr.get('state_id'):
+                    parent_update['state_id'] = _meli_addr['state_id']
+                if (not partner_id.street or partner_id.street == "no street") and _meli_addr.get('street'):
+                    parent_update['street'] = _meli_addr['street']
+                if (not partner_id.city or partner_id.city == "") and _meli_addr.get('city'):
+                    parent_update['city'] = _meli_addr['city']
                 if not partner_id.phone and 'phone' in meli_buyer_fields and meli_buyer_fields['phone']:
                     parent_update['phone'] = meli_buyer_fields['phone']
-                # [#682] mobile vacio: toma el telefono que manda ML (no pisa uno cargado a mano)
+                # [#caso-K17] mobile vacio: toma el telefono que manda ML (no pisa uno cargado a mano)
                 if 'mobile' in partner_id._fields and not partner_id.mobile and meli_buyer_fields.get('phone'):
                     parent_update['mobile'] = meli_buyer_fields['phone']
                 if partner_id.email and (partner_id.email == buyer_fields.get("email", "") or "mercadolibre.com" in str(partner_id.email)):
@@ -5894,7 +6095,7 @@ class mercadolibre_orders(models.Model):
                             _protected_skipped.append(_fp)
                             del invoice_update[_fp]
                     if _protected_skipped:
-                        _logger.info(
+                        _logger.debug(
                             "FISCAL_PROTECT: contacto id:%s ya tiene valores para %s "
                             "— no sobreescritos (ML no envió datos explícitos en esta corrida)",
                             partner_invoice_id.id, _protected_skipped)
@@ -6044,7 +6245,7 @@ class mercadolibre_orders(models.Model):
                     _fix_fields.append("l10n_ar_afip_responsibility_type_id = %s")
                     _fix_vals.append(partner_invoice_id.l10n_ar_afip_responsibility_type_id.id)
                 if _fix_fields and _meli_partner_fiscal_sql_fix(self.env.cr, partner_invoice_id.id, _fix_fields, _fix_vals):
-                    _logger.info("COMMERCIAL_FIELDS_FIX SQL: datos fiscales en billing child id:%s (%s)",
+                    _logger.debug("COMMERCIAL_FIELDS_FIX SQL: datos fiscales en billing child id:%s (%s)",
                                  partner_invoice_id.id, ", ".join(_fix_fields))
 
             # Modo 3: detectar VAT duplicado en buyer y limpiar / avisar
@@ -6129,17 +6330,20 @@ class mercadolibre_orders(models.Model):
         if original_contact_partner_id:
             #fix Just, fijar la lista de precio predeterminada de cada cliente
             try:
-                with self.env.cr.savepoint():
-                    original_contact_partner_id.property_product_pricelist = (config and config.mercadolibre_pricelist)
+                # [#696] sin cambio no se escribe: el write igual toca la fila del contacto en cada import
+                _meli_pl = (config and config.mercadolibre_pricelist) or self.env['product.pricelist']
+                if original_contact_partner_id.property_product_pricelist != _meli_pl:
+                    with self.env.cr.savepoint():
+                        original_contact_partner_id.property_product_pricelist = _meli_pl
             except Exception as e:
                 _logger.warning('Could not set pricelist on partner %s (id:%s): %s',
                                 original_contact_partner_id.name, original_contact_partner_id.id, e)
 
 
         if (original_contact_partner_id):
-            # [#513] si la entrega del pedido se fijo a mano no se busca / crea / actualiza el contacto de ML
-            _meli513_ship_locked = bool(sorder and sorder.id and sorder._meli_address_locked('partner_shipping_id'))
-            if config.mercadolibre_cron_get_orders_shipment_client and not _meli513_ship_locked:
+            # [#caso-K03] si la entrega del pedido se fijo a mano no se busca / crea / actualiza el contacto de ML
+            _meli_k03_ship_locked = bool(sorder and sorder.id and sorder._meli_address_locked('partner_shipping_id'))
+            if config.mercadolibre_cron_get_orders_shipment_client and not _meli_k03_ship_locked:
                 partner_shipping_id = self.env["mercadolibre.shipment"].partner_delivery_id( partner_id=original_contact_partner_id,
                                                                                             Receiver=Receiver,
                                                                                             config=config)
@@ -6267,13 +6471,13 @@ class mercadolibre_orders(models.Model):
                 meli_order_fields.update({'partner_id': (partner_id and partner_id.id)})
 
         if partner_invoice_id:
-            # [#513] partner_invoice_id se aplica abajo en _meli_merge_ml_addresses (respeta un cambio
+            # [#caso-K03] partner_invoice_id se aplica abajo en _meli_merge_ml_addresses (respeta un cambio
             # manual). La posicion fiscal sale de la factura que va a quedar en el pedido.
-            _meli513_inv_eff = partner_invoice_id
+            _meli_k03_inv_eff = partner_invoice_id
             if (sorder and sorder.id and sorder.partner_invoice_id
                     and sorder.partner_invoice_id != partner_invoice_id
                     and sorder._meli_address_locked('partner_invoice_id')):
-                _meli513_inv_eff = sorder.partner_invoice_id
+                _meli_k03_inv_eff = sorder.partner_invoice_id
 
             # Blue Orange / CER: set fiscal_position_id from billing partner's property_account_position_id
             # This ensures the sale order has the correct fiscal position for invoice document type selection.
@@ -6282,12 +6486,12 @@ class mercadolibre_orders(models.Model):
             _set_fp = ('mercadolibre_set_fiscal_position' not in config._fields
                        or config.mercadolibre_set_fiscal_position)
             if _set_fp:
-                if 'property_account_position_id' in _meli513_inv_eff._fields and _meli513_inv_eff.property_account_position_id:
-                    meli_order_fields['fiscal_position_id'] = _meli513_inv_eff.property_account_position_id.id
+                if 'property_account_position_id' in _meli_k03_inv_eff._fields and _meli_k03_inv_eff.property_account_position_id:
+                    meli_order_fields['fiscal_position_id'] = _meli_k03_inv_eff.property_account_position_id.id
             else:
                 meli_order_fields['fiscal_position_id'] = False
 
-        # [#513 TYL] factura / entrega: al crear o si estan vacias; despues solo si nadie las cambio a mano
+        # [#caso-K03 cliente A] factura / entrega: al crear o si estan vacias; despues solo si nadie las cambio a mano
         ((sorder and sorder.id and sorder) or saleorder_obj)._meli_merge_ml_addresses(
             meli_order_fields, invoice_partner=partner_invoice_id or None,
             shipping_partner=partner_shipping_id or None)
@@ -6337,7 +6541,7 @@ class mercadolibre_orders(models.Model):
         else:
             #_logger.info(Adding new order: " )
             #_logger.info(order_fields)
-            # #431: si un indice unico (meli_oerp_multiple) rechaza la fila porque otro proceso la
+            # #caso-K13: si un indice unico (meli_oerp_multiple) rechaza la fila porque otro proceso la
             # acaba de crear, se saltea sin dejar la transaccion abortada para el resto del lote.
             try:
                 with self.env.cr.savepoint():
@@ -6349,7 +6553,7 @@ class mercadolibre_orders(models.Model):
                     return {'error': _msg}
                 raise
 
-        # #542-661: en una orden NUEVA el comprador (mercadolibre.buyers) se crea antes que la orden,
+        # #caso-K14-K19: en una orden NUEVA el comprador (mercadolibre.buyers) se crea antes que la orden,
         # así que el `if order and buyer_id` de arriba no la vinculaba: se vincula ahora.
         if order and buyer_id and 'buyer' in order._fields and order.buyer != buyer_id:
             try:
@@ -6369,14 +6573,21 @@ class mercadolibre_orders(models.Model):
                     _payments_coupon += float(_p.get('coupon_amount') or 0.0)
                 except (TypeError, ValueError):
                     pass
-        # 26.318 (#431 B): la orden miembro de un PACK también busca SU descuento. Antes se salteaba
+        # 26.318 (#caso-K13 B): la orden miembro de un PACK también busca SU descuento. Antes se salteaba
         # (precaución por el incidente 26.131) y el carrito con cupón del vendedor quedaba a precio lleno,
-        # por ARRIBA de lo cobrado. ML informa el descuento POR ORDEN (medido en 431: la suma de
+        # por ARRIBA de lo cobrado. ML informa el descuento POR ORDEN (medido en caso-K13: la suma de
         # /discounts de las órdenes de un carrito = el cupón del carrito; no se repite por orden) y queda
         # en la mercadolibre.orders de cada miembro. Las líneas del pack las arma
         # mercadolibre.shipment, que PRORRATEA el total del pack por el bruto de cada ítem
         # (_meli_pack_seller_discount): nunca se resta el importe del pack entero en una línea.
-        if order and (order.coupon_amount > 0 or _payments_coupon > 0):
+        # 26.330 (#caso-K13 B, medido en prod 28-oct): en la orden miembro de un pack ML manda `coupon: null`
+        # y `payments[].coupon_amount: 0` -- el cupón del carrito sólo aparece en /orders/{id}/discounts.
+        # La guarda de arriba nunca entraba y el pack quedaba a precio lleno (51 de 51 en caso-K13). La única
+        # señal en la orden es el tag `order_has_discount`: con él, la orden miembro busca su descuento.
+        # (Una consulta por orden, la misma que ya hace la venta simple; no cambia la venta simple.)
+        _pack_has_discount = bool(order_json.get('pack_id')) and \
+            'order_has_discount' in (order_json.get('tags') or [])
+        if order and (order.coupon_amount > 0 or _payments_coupon > 0 or _pack_has_discount):
             order._fetch_order_discounts(meli=meli)
             meli_order_fields['meli_discount_seller_amount'] = order.discount_seller_amount or 0.0
 
@@ -6384,7 +6595,7 @@ class mercadolibre_orders(models.Model):
             #_logger.info("Updating sale.order: %s" % (sorder.id))
             if (sorder.state in ['sale','done']) or ("locked" in sorder._fields and sorder.locked):
                 del meli_order_fields["pricelist_id"]
-                # [529] (19-oct-2026) Una venta confirmada ya no reescribe sus lineas: si se le cambia
+                # [caso-K11] (19-oct-2026) Una venta confirmada ya no reescribe sus lineas: si se le cambia
                 # el descuento del vendedor, el control de importe (meli_amount_to_invoice) deja de
                 # coincidir con el precio de sus lineas y la venta queda trabada sin facturar.
                 meli_order_fields.pop('meli_discount_seller_amount', None)
@@ -6465,7 +6676,7 @@ class mercadolibre_orders(models.Model):
             if order and order.sale_order and partner_invoice_id and partner_id and partner_invoice_id.id != partner_id.id:
                 _pack_so = order.sale_order
                 if ((not _pack_so.partner_invoice_id or _pack_so.partner_invoice_id.id != partner_invoice_id.id)
-                        and not _pack_so._meli_address_locked('partner_invoice_id')):  # [#513]
+                        and not _pack_so._meli_address_locked('partner_invoice_id')):  # [#caso-K03]
                     try:
                         _pack_so.write({'partner_invoice_id': partner_invoice_id.id,
                                         'meli_partner_invoice_auto_id': partner_invoice_id.id})
@@ -6549,7 +6760,7 @@ class mercadolibre_orders(models.Model):
                     else:
                         seller_sku = ('seller_sku' in Item['item'] and Item['item']['seller_sku']) or ('seller_custom_field' in Item['item'] and Item['item']['seller_custom_field'])
 
-                    # [#543] Respaldo por TOKEN del SKU (apagado = no hace nada).
+                    # [#caso-K10] Respaldo por TOKEN del SKU (apagado = no hace nada).
                     if (not product_related and seller_sku):
                         product_related = product_obj._meli_sku_token_resolve( seller_sku, config, company_domain )
 
@@ -6848,7 +7059,7 @@ class mercadolibre_orders(models.Model):
                         if len(_same_item) == 1:
                             saleorderline_item_ids = _same_item
                     if not saleorderline_item_ids:
-                        # 26.250 (#431 bug 6): adoptar la línea del mismo producto sin vínculo ML
+                        # 26.250 (#caso-K13 bug 6): adoptar la línea del mismo producto sin vínculo ML
                         # (la deja el usuario al cancelar y reconfirmar) en vez de crear otra.
                         saleorderline_item_ids = order._meli_adopt_unlinked_sale_line(sorder, saleorderline_item_fields)
                     if not saleorderline_item_ids:
@@ -6877,7 +7088,7 @@ class mercadolibre_orders(models.Model):
                             pass;
                         else:
                             _logger.info("Sale Order line write")
-                            # [#526, 26.316] solo lo que cambio + precio de ML restituido si lo pisan
+                            # [#caso-K15, 26.316] solo lo que cambio + precio de ML restituido si lo pisan
                             saleorderline_item_ids._meli_write_ml_line( saleorderline_item_fields, config=config )
 
         if 'payments' in order_json:
@@ -7065,8 +7276,8 @@ class mercadolibre_orders(models.Model):
             # reparto depende SOLO del modo declarado en la config.
             _coupon_mode = meli_resolve_coupon_invoice_mode(config)
             _so_editable = sorder.state not in ('done',) and not ("locked" in sorder._fields and sorder.locked)
-            # [529] (19-oct-2026) Una venta con factura de cliente POSTEADA no se re-descuenta:
-            # reescribir line.discount despues de facturar deja venta != factura (SO 19396:
+            # [caso-K11] (19-oct-2026) Una venta con factura de cliente POSTEADA no se re-descuenta:
+            # reescribir line.discount despues de facturar deja venta != factura (SO 17255:
             # factura 54.312,35, OdooBot la bajo a 54.009,56 seis minutos despues). Se mira la
             # factura posteada y NO qty_invoiced, porque qty_invoiced tambien cuenta borradores
             # y el borrador SI debe seguir el cupon (meli_sync_draft_invoice_discounts).
@@ -7102,7 +7313,7 @@ class mercadolibre_orders(models.Model):
                             discount_pct, order.coupon_amount, total_gross,
                             len(non_delivery_lines), sorder.name,
                         )
-                        # [529] el cupon puede cambiar despues de creada la factura borrador
+                        # [caso-K11] el cupon puede cambiar despues de creada la factura borrador
                         meli_sync_draft_invoice_discounts(sorder)
             elif _coupon_mode == 'separate_line':
                 if _so_editable and _ml_coupon > 0.0:
@@ -7290,7 +7501,7 @@ class mercadolibre_orders(models.Model):
             else:
                 ret = self.orders_update_order_json( {"id": False, "order_json": order_json }, meli=meli, config=config )
                 if isinstance(ret, dict) and 'MELI_IMPORT_PARALLEL' in str(ret.get('error') or ''):
-                    # #431: la importa otro proceso en paralelo: quien llama lo ve como SKIP, no como importada.
+                    # #caso-K13: la importa otro proceso en paralelo: quien llama lo ve como SKIP, no como importada.
                     return { "error": ret["error"] }
                 if ret:
                     #_logger.info(ret)

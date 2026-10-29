@@ -133,13 +133,15 @@ class res_company(models.Model):
                             ("VES","Peso Venezolano (VES)"),
                             ("PAB","Balboa Panameño (PAB)"),
                             ("USD","Dolar Estadounidense (USD)")]
-        if (meli):
+        # C-1: decia `ML.append` (NameError si corria). Sin llamadores en el suite: se deja coherente con
+        # _get_ML_sites (sin token no se consulta ML) y sólo se reemplaza la lista si ML devolvio una lista.
+        if (meli and meli.access_token and meli.access_token != "PASIVA"):
             response = meli.get("/currencies")
-            if (response):
+            currencies = response and response.json()
+            if (currencies and isinstance(currencies, list)):
                 ML_currencies = []
-                currencies = response.json()
                 for k in currencies:
-                    ML.append(( k["id"], k["description"] ))
+                    ML_currencies.append(( k["id"], k["description"] ))
 
         return ML_currencies
 
@@ -168,7 +170,11 @@ class res_company(models.Model):
             "PAB": { "name": "Panamá", "id": "MPA", "default_currency_id": "PAB" },
             "USD": { "name": "Uruguay", "id": "MLU", "default_currency_id": "UYU" },
         }
-        response = meli and meli.get("/sites",{ "access_token": str(meli.access_token) } )
+        # Sin cuenta conectada (token vacio/PASIVA) ML responde 403 a /sites y dejaba un WARNING por cada
+        # get_new_instance (12 por recorrido de UI). Sin token se usa el mapa local de arriba, que es lo
+        # mismo que quedaba tras el 403. Con token: igual que antes.
+        _atok = meli and meli.access_token
+        response = _atok and _atok != "PASIVA" and meli.get("/sites",{ "access_token": str(_atok) } )
         if (response):
             sites = response.json()
             #_logger.info(sites)
@@ -885,9 +891,10 @@ class res_company(models.Model):
             if (rjson2 and 'error' in rjson2):
                 _logger.error(rjson2)
                 if rjson2['message']=='invalid_token' or rjson2['message']=='expired_token':
-                    ACCESS_TOKEN = ''
-                    REFRESH_TOKEN = ''
-                    account.write({'access_token': ACCESS_TOKEN, 'refresh_token': REFRESH_TOKEN, 'code': '' } )
+                    # C-1: aca decia `account.write({'access_token': '', ...})` (copia del metodo de la CUENTA en
+                    # multiple; en res.company `account` no existe => NameError y rollback). No se borran los
+                    # tokens: el refresh_token sigue sirviendo para que el cron recupere la sesion (mismo
+                    # criterio que get_new_instance). Se devuelve el login, que es lo que el camino pide.
                     condition = True
                     url_login_meli = meli.auth_url()
                     return {
@@ -1233,7 +1240,7 @@ class res_company(models.Model):
                                     posting_id.meli_id = item_id
                                 if (len(posting_id)>1):
                                     _logger.error("Founded templates more than 2 default code: seller_sku: "+str(seller_sku)+" template: "+str(posting_id.mapped('name')))
-                            # [#543] Respaldo por TOKEN del SKU (mercadolibre_sku_token_match):
+                            # [#caso-K10] Respaldo por TOKEN del SKU (mercadolibre_sku_token_match):
                             # solo si la busqueda exacta no encontro nada. Apagado = no hace nada.
                             if (not posting_id or len(posting_id)==0):
                                 token_id = self.env['product.product']._meli_sku_token_resolve( seller_sku, company, company_domain )
@@ -1291,7 +1298,7 @@ class res_company(models.Model):
                                         if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
                                             posting_id.meli_id_variation = var['id']
 
-                                # [#543] Respaldo por TOKEN del SKU de la variacion (apagado = no hace nada).
+                                # [#caso-K10] Respaldo por TOKEN del SKU de la variacion (apagado = no hace nada).
                                 if (company.mercadolibre_import_search_sku and not posting_id):
                                     var_sku = ( var.get('seller_custom_field') or var.get('seller_sku') )
                                     token_id = var_sku and self.env['product.product']._meli_sku_token_resolve( var_sku, company, company_domain )
@@ -1367,7 +1374,9 @@ class res_company(models.Model):
                     #elif (not company.mercadolibre_import_search_sku):
                     else:
                         #idcreated = self.pool.get('product.product').create(cr,uid,{ 'name': rjson3['title'], 'meli_id': rjson3['id'] })
-                        if (official_store_id and "official_store_id" in rjson and str(official_store_id)!=str(rjson["official_store_id"])):
+                        # C-1: decia `rjson` (no existe en este metodo => NameError con tienda oficial configurada);
+                        # el item que se esta mirando es rjson3.
+                        if (official_store_id and "official_store_id" in rjson3 and str(official_store_id)!=str(rjson3["official_store_id"])):
                             continue;
 
                         if 'id' in rjson3:
@@ -1603,6 +1612,11 @@ class res_company(models.Model):
         self.product_meli_update_remote_products(post_new=post_new)
         return {}
 
+    # C-1: get_all_items_from_existing_sku hacia time.sleep(RATE_LIMIT) sin que RATE_LIMIT existiera nunca (NameError
+    # despues del PRIMER producto: el primero se procesaba y el resto no). Pausa entre SKUs (2 GET por SKU):
+    # 0,5 s = 4 req/s, lejos del limite de ML por aplicacion. Sin llamadores en el suite (se usa por RPC/accion).
+    MELI_SKU_RATE_LIMIT = 0.5
+
     @api.model
     def get_all_items_from_existing_sku(self, products):
         company = self.env.company
@@ -1641,7 +1655,7 @@ class res_company(models.Model):
                             continue
                     else:
                         _logger.warning("Sin información disponible.")
-            time.sleep(RATE_LIMIT)
+            time.sleep(self.MELI_SKU_RATE_LIMIT)
                 
     @api.model
     def get_all_items_from_ML(self):
@@ -2083,7 +2097,7 @@ class res_company(models.Model):
                           meli_id, _st_err)
 
     def _meli_stock_safety_resolver(self):
-        """[529] Devuelve f(sku) -> stock de seguridad vigente para esta compania.
+        """[caso-K11] Devuelve f(sku) -> stock de seguridad vigente para esta compania.
 
         El diagnostico compara contra el stock de Odoo y tiene que descontar LO MISMO que descuenta
         el envio (_meli_available_quantity); si no, reactiva o "corrige" publicaciones que el
@@ -2125,11 +2139,11 @@ class res_company(models.Model):
         return _resolve
 
     def _meli_stock_safety_qty(self, sku=None):
-        """[529] N vigente para `sku` (ver _meli_stock_safety_resolver)."""
+        """[caso-K11] N vigente para `sku` (ver _meli_stock_safety_resolver)."""
         return self._meli_stock_safety_resolver()(sku)
 
     def _meli_diag_publishable_qty(self, product, meli_id, meli, rjson):
-        """[525 #611] Cantidad que PUBLICARIA el push para esta publicacion.
+        """[caso-K01 #caso-K12] Cantidad que PUBLICARIA el push para esta publicacion.
 
         Misma funcion que usa el push (_meli_available_quantity), con la configuracion de la
         cuenta de la vinculacion (si hay meli_oerp_multiple) y por lo tanto las MISMAS
@@ -2164,7 +2178,7 @@ class res_company(models.Model):
             return None
 
     def _meli_diag_status_after_activate(self, meli, meli_id):
-        """[525 #611] Estado REAL en ML despues de pedir la activacion: (status, sub_status).
+        """[caso-K01 #caso-K12] Estado REAL en ML despues de pedir la activacion: (status, sub_status).
         status=None si no se pudo verificar."""
         try:
             response = meli.get("/items/%s" % meli_id, {'access_token': meli.access_token})
@@ -2240,7 +2254,7 @@ class res_company(models.Model):
             AND (pp.meli_shipping_logistic_type IS NULL OR pp.meli_shipping_logistic_type != 'fulfillment')
         """, (company.id,))
         rows = self.env.cr.fetchall()
-        # [529] el stock de Odoo se compara YA descontado el stock de seguridad (mismo calculo que el envio),
+        # [caso-K11] el stock de Odoo se compara YA descontado el stock de seguridad (mismo calculo que el envio),
         # por SKU segun las reglas de stock de la configuracion.
         _safety_for = company._meli_stock_safety_resolver()
 
@@ -2304,7 +2318,7 @@ class res_company(models.Model):
                 for pid2, sku2, meli_id2, meli_qty2, odoo_qty2 in self.env.cr.fetchall():
                     odoo_qty2 = max((odoo_qty2 or 0.0) - _safety_for(sku2), 0.0)
                     if odoo_qty2 <= 0:
-                        # [529] todo su stock esta resguardado por la regla: nada que reactivar
+                        # [caso-K11] todo su stock esta resguardado por la regla: nada que reactivar
                         continue
                     # Skip if already in reactivate_candidates or fulfillment_user_candidates
                     already = (
@@ -2425,7 +2439,7 @@ class res_company(models.Model):
                             checked_items_log.append(f"⏭ {item_log} → paused, NO se reactiva (modo={reactivate}, sub_status={_ml_sub})")
                             continue
                         product = self.env['product.product'].browse(pid)
-                        # [525 #611] El SQL de arriba suma TODAS las ubicaciones internas (Full incluida),
+                        # [caso-K01 #caso-K12] El SQL de arriba suma TODAS las ubicaciones internas (Full incluida),
                         # pero el push publica solo las de la configuracion. Si lo publicable es 0, activar
                         # no sirve: ML la vuelve a pausar y esto se repetia cada 30 min anotando REACTIVADA.
                         _publishable = self._meli_diag_publishable_qty(product, meli_id, meli, rjson)
@@ -2455,7 +2469,7 @@ class res_company(models.Model):
                             product.product_post_stock(meli=meli)
                             try:
                                 product.product_meli_status_active(meli=meli)
-                                # [525 #611] Se anota REACTIVADA solo si ML la muestra activa.
+                                # [caso-K01 #caso-K12] Se anota REACTIVADA solo si ML la muestra activa.
                                 _after, _after_sub = self._meli_diag_status_after_activate(meli, meli_id)
                                 if _after:
                                     self._meli_diag_persist_ml_status(pid, meli_id, _after, ml_qty)
@@ -2848,6 +2862,7 @@ class res_company(models.Model):
             rjson = response.json()
             #_logger.info( rjson )
             condition_last_off = True
+            ioff = 0  # C-1: contador de la paginacion scan; se fija abajo si ML devuelve scroll_id
             if ('scroll_id' in rjson):
                 scroll_id = rjson['scroll_id']
                 ioff = rjson['paging']['limit']

@@ -1254,7 +1254,7 @@ class product_product(models.Model):
     _inherit = "product.product"
 
     # ------------------------------------------------------------------
-    # [#543] Match de SKU por TOKEN (opcion `mercadolibre_sku_token_match`).
+    # [#caso-K10] Match de SKU por TOKEN (opcion `mercadolibre_sku_token_match`).
     # UN solo helper para todos los puntos de matching por SKU del suite
     # (importacion, binding, ventas). Con la opcion APAGADA devuelve vacio/False
     # SIN tocar la base: los llamadores lo usan solo como RESPALDO despues de la
@@ -1553,7 +1553,7 @@ class product_product(models.Model):
 
         if ( tax_excluded and product_template.taxes_id ):
             _logger.info("Adjust taxes")
-            # [543] solo los impuestos de la compania de la config (antes sumaba los de todas: /1,42 con dos)
+            # [caso-K10] solo los impuestos de la compania de la config (antes sumaba los de todas: /1,42 con dos)
             txpercent, txfixed = ml_sale_tax_rates(product_template.taxes_id, company)
             if (txfixed>0 or txpercent>0):
                 #_logger.info("Tx Total:"+str(txtotal)+" to Price:"+str(ml_price_converted))
@@ -1573,7 +1573,7 @@ class product_product(models.Model):
 
         if ( tax_excluded and product_template.taxes_id ):
             _logger.info("Adjust taxes")
-            # [543] solo los impuestos de la compania de la config (antes sumaba los de todas: /1,42 con dos)
+            # [caso-K10] solo los impuestos de la compania de la config (antes sumaba los de todas: /1,42 con dos)
             txpercent, txfixed = ml_sale_tax_rates(product_template.taxes_id, company)
             if (txfixed>0 or txpercent>0):
                 #_logger.info("Tx Total:"+str(txtotal)+" to Price:"+str(ml_price_converted))
@@ -1653,7 +1653,9 @@ class product_product(models.Model):
         #_logger.info("set_meli_price: "+str(product_tmpl.list_price)+ " >> "+str(product_tmpl.display_name)+": "+str(product_tmpl.meli_price)+" | "+str(product.display_name)+": "+str(product.meli_price) )
 
         pl = (product.meli_currency and product.meli_currency in ["USD"] and "mercadolibre_pricelist_usd" in config._fields and config.mercadolibre_pricelist_usd and config.mercadolibre_pricelist_usd.currency_id.name=="USD" and config.mercadolibre_pricelist_usd)
-        pl = pl or config.mercadolibre_pricelist or plist
+        # [26.334] una lista EXPLICITA (p.ej. «Nueva Lista de Precios» del asistente de publicar) gana
+        # sobre la de la configuracion de la cuenta. Antes `plist` iba ultima y nunca se usaba.
+        pl = plist or pl or config.mercadolibre_pricelist
 
 
         # NEW OR NULL
@@ -1679,7 +1681,7 @@ class product_product(models.Model):
         else:
             #_logger.info( "new_price: " +str(new_price))
             if ( product.meli_price_fixed and product.meli_price):
-                new_price = int(float(product.meli_price)) or int(float(product_tmpl_id.meli_price)) or 0
+                new_price = int(float(product.meli_price)) or int(float(product_tmpl.meli_price or 0)) or 0  # C-1: era product_tmpl_id (NameError con precio fijo < 1)
             else:
                 if ( product.lst_price ):
                     new_price = product.lst_price
@@ -1687,7 +1689,7 @@ class product_product(models.Model):
         tax_excluded = ml_tax_excluded(self, config=config)
         if ( price_list_apply_tax and tax_excluded and product_tmpl.taxes_id ):
             _logger.info("Adjust taxes for publish")
-            # [543] solo los impuestos de la compania de la config (antes sumaba los de todas: /1,42 con dos)
+            # [caso-K10] solo los impuestos de la compania de la config (antes sumaba los de todas: /1,42 con dos)
             txpercent, txfixed = ml_sale_tax_rates(product_tmpl.taxes_id, company)
             if (txfixed>0 or txpercent>0):
                 #_logger.info("Tx Total:"+str(txtotal)+" to Price:"+str(ml_price_converted))
@@ -2738,7 +2740,7 @@ class product_product(models.Model):
         if "variations" in rjson and len(rjson["variations"])>1:
             force_price_for_variant = False
 
-        # [452] Con una oferta activa ML devuelve en 'price' el precio CON DESCUENTO y en
+        # [caso-K20] Con una oferta activa ML devuelve en 'price' el precio CON DESCUENTO y en
         # 'original_price' el de lista. Al importar, el precio de Odoo es el de LISTA: la oferta
         # es de ML y vence; si se copia a la lista de precios, Odoo queda con el precio rebajado.
         meli_list_price = rjson.get('price')

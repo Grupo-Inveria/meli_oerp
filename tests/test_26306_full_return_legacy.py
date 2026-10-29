@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""26.306 (#607) -- `meli_oerp.cancel_return_full=1` habilita la devolucion de envios FULL
+"""26.306 (#caso-K16) -- `meli_oerp.cancel_return_full=1` habilita la devolucion de envios FULL
 tambien en el modo legacy, SIN la politica por motivo (`cancel_reason_policy=by_reason`).
 
 Sin el parametro: identico a antes (FULL sin devolucion). Con el parametro siguen mandando
@@ -52,7 +52,7 @@ class TestFullReturnLegacy(TransactionCase):
     # -------------------------------------------------------------- helpers --
     def _prod(self):
         Product = self.env["product.product"]
-        pvals = {"name": "P-607", "list_price": 100.0, "invoice_policy": "order"}
+        pvals = {"name": "P-K16", "list_price": 100.0, "invoice_policy": "order"}
         if "is_storable" in Product._fields:
             pvals.update(type="consu", is_storable=True)
         elif "detailed_type" in Product._fields:
@@ -63,7 +63,7 @@ class TestFullReturnLegacy(TransactionCase):
         self.env["stock.quant"]._update_available_quantity(prod, self.wh.lot_stock_id, 50)
         return prod
 
-    def _mkso(self, oid="2000099960701", logistic="fulfillment"):
+    def _mkso(self, oid="2000305054244", logistic="fulfillment"):
         prod = self._prod()
         vals = {"partner_id": self.cust.id, "meli_order_id": oid, "meli_status": "cancelled",
                 "order_line": [(0, 0, {"product_id": prod.id, "product_uom_qty": 2, "price_unit": 100})]}
