@@ -4,6 +4,56 @@
 
 ---
 
+## 30 oct 2026 — flete del envío: sólo lo que COBRA el vendedor · descuento del vendedor configurable por cliente [caso-K22 535 / caso-K02 158 / caso-K13 431] (v19.0.26.342)
+**Síntoma (caso-K22, tras el pase a 26.335):** SO 181677 = 188 + 53 de envío con la orden ML cobrada en 188 (pago con shipping 0); SO 181678 y 181690
+quedaron por debajo de lo cobrado por MercadoPago (436,99 → 403,59; 589,27 → 550,97) por el cupón del vendedor restado (26.330). caso-K02: packs con
+flete cobrado sin línea de envío (corre 26.313).
+**Causa flete:** con `use_payment_shipping_amount=True` el flete sale de `shipping_receiver_cost`, cuyo único escritor es `_meli_pack_receiver_cost`
+(26.319): suma los pagos MP `marketplace_shipment` del envío que devuelve `/v1/payments/search` con el token del vendedor. Ese search trae los pagos
+en los que el usuario PARTICIPA, y el filtro no miraba quién pagaba ni quién cobraba. `cost_details` del vendedor NO discrimina (medido 27-oct:
+aparece también con el flete dentro del pago) — no se usa.
+**Fix flete:** `seller_collected_shipping(search, ship_id, seller_id)` cuenta sólo los pagos COBRADOS por el vendedor: descarta `payer.id == vendedor`
+y `collector_id != vendedor` (cuando vienen). Vendedor = `sender_id` del envío (o `mercadolibre_seller_id`). Sin vendedor, el criterio de 26.319.
+Criterio único para 535 y 158: la línea de envío va sólo si el comprador pagó el flete (en el pago de la orden o en un pago aparte cobrado por el
+vendedor) y por ese monto. caso-K02 ya lo tiene desde 26.319 (le falta el pase).
+**Causa cupón:** en un carrito ML manda `coupon: null` y `payments[].coupon_amount: 0` en caso-K13 Y en caso-K22: el pago trae los ítems enteros. No
+hay dato que separe los dos; es cómo concilia cada cliente (caso-K13 #547: ítems − cupón; caso-K22: lo cobrado por MP).
+**Fix cupón:** parámetro de sistema `meli_oerp.seller_coupon_mode` (toda la base) / `meli_oerp.seller_coupon_mode.company_<id>` (por compañía):
+`discount` (default = 26.229..26.341, sin cambios para nadie) | `collected` (el descuento del vendedor no se resta: venta = cobrado). Se aplica tras
+`_fetch_order_discounts` (`_meli_apply_seller_coupon_mode`) y en `_meli_pack_seller_discount` (aunque haya quedado guardado). Una venta confirmada no
+se reescribe (guarda #caso-K11 de siempre): las ya entradas se reparan con resync tras setear el parámetro, un caso primero.
+**Prueba:** `tests/test_receiver_cost_pure.py::TestFleteCobradoPorElVendedor` (6; /costs real de 181677, pagos sintéticos etiquetados para las dos
+lecturas; pagos reales caso-K02/K21 siguen contando; A/B caso-K02 26.313=0 vs 26.319+=102.089). Control origin 26.341: 3 rojos (53 != 0); fix verde.
+`tests/test_26342_cupon_modo.py` (tag meli_26342, 6; payloads reales 181678/181690 en los dos modos + resolución del parámetro).
+**Activar en un cliente que concilia contra lo cobrado:** Ajustes › Técnico › Parámetros del sistema: `meli_oerp.seller_coupon_mode` = `collected`.
+
+## 29 oct 2026 — Meli Stock Diagnostic con presupuesto por corrida (26.190 re-portado sobre #caso-K12) + venta ML sin producto visible [#598 OrgVit 475] (v19.0.26.341)
+**Síntoma:** el cron "Meli Stock Diagnostic" (reactiva pausadas con stock) terminaba "Interrumpido" 144 veces por día desde el
+12-ago y Odoo lo desactivó solo el 30-ago (475). Las pausadas con stock no volvían solas. Las ventas ML sin producto quedaban en
+presupuesto con un aviso en el chatter que nadie veía.
+**Causa:** `meli_stock_diagnostic` hacía un GET a ML por candidato, sin límite, todo en UNA transacción (`MeliCommit` sólo hace
+flush): al morir el worker se perdía todo, incluido lo que F3 persiste, y la corrida siguiente volvía a morir.
+**Fix (26.190 de oct-6, que nunca se landeó, re-escrito SOBRE el código actual — no revierte #caso-K12/26.257):**
+multiget `/items?ids=` de a 20 (`_meli_diag_multiget`, pide también `sub_status` y `variations`, que usan la verificación de stock
+publicable y la relectura post-activación de K12), tope de ítems `meli_stock_diag_max_items` (def 100) y de segundos
+`meli_stock_diag_time_budget` (def 45), cursor `meli_stock_diag_cursor.<company>.<seller>` que retoma y da la vuelta, commit por
+lote con `commit_batches=True` (lo pasa el cron dedicado de meli_oerp_multiple; en tests nunca: `thread.testing` en 16-18,
+`odoo.modules.module.current_test` en 19+). Devuelve `items_processed`/`items_deferred`; el chatter muestra "Pendientes para la
+próxima corrida". Venta ML sin producto: actividad "Por hacer" al vendedor ML (una por ítem, mismo dedupe que el chatter) + filtro
+"ML: producto no encontrado" en Presupuestos. Sin campos nuevos ni migración (sólo vista: requiere `-u`).
+**Prueba:** `tests/test_26341_stock_diag_presupuesto.py` (tag meli_26341): tope 20 ⇒ 1 multiget/0 GET sueltos, cursor y retoma,
+vuelta al principio, corrida completa limpia cursor, rechazo por ítem = api_error, tope de segundos, commit por lote [1,2,3,3] y
+0 commits sin commit_batches, actividad única + filtro. Control origin (26.339) 8 rojos; fix verde. `test_k01_stock_diag_full`
+(K12) adaptado a multiget y verde en ambos.
+**Activar en un cliente:** el cron es `noupdate`: si Odoo lo desactivó, reactivarlo a mano después del `-u`.
+
+## 29 oct 2026 — el GC de notificaciones (#696) chocaba con el cron de órdenes: SerializationFailure en el DELETE [staging 393 PetMarkt 19.0] (v19.0.26.338)
+**Síntoma:** staging 393 (19.0, 20c563b9) 11:59:01Z: `SerializationFailure` en `_gc_meli_notifications` (autovacuum) mientras el cron 177 «Meli Process Order Notifications» (meli_oerp_multiple `cron_order_notifications`) marcaba `older_notis.state='SUCCESS'`. En prod el que pierde (o espera) puede ser el cron de ventas.
+**Causa:** el GC de 26.335 hacía `search()` ORM sin tope + `unlink()` por lotes de 1000: el DELETE espera cualquier fila tomada `FOR UPDATE` por otro proceso (sin timeout) y, en REPEATABLE READ, revienta con una fila actualizada después de su snapshot. Además borraba FAILED orders_v2 que el cron todavía reintenta (<24 intentos).
+**Fix:** candidatos por SQL plano con tope (`_GC_MAX_BATCHES × _GC_BATCH_SIZE` = 20×500); `_gc_meli_delete_chunk`: `SELECT … FOR UPDATE OF n SKIP LOCKED` re-chequeando las condiciones + `DELETE` en savepoint propio; si el lote choca (`LockNotAvailable`/`SerializationFailure`/`DeadlockDetected`) se reintenta fila a fila y lo que choca se saltea; `set_config('lock_timeout','2s', local)` restaurado al final; `log_exceptions=False` (no ensucia el log). Excluye el working set del cron 177: FAILED orders_v2 con `attempts < 24`, resource con hermanas RECEIVED/PROCESSING/FAILED reintentable, y `write_date` < 24 h. Sin commits (los hace el autovacuum). Firma: `_gc_meli_notifications(batch_size=None, max_batches=None)`.
+**Prueba:** `tests/test_gc_notificaciones_lock.py` (tag `meli_gc_lock`, conexiones reales aparte): B tiene una fila `FOR UPDATE`, D commitea un UPDATE post-snapshot, el GC corre en C con `statement_timeout` 8 s. Control origin 26.337: «canceling statement due to statement timeout» (esperó 8 s) + working set borrado ⇒ ROJO; fix: termina en ms, saltea las 2 y borra el resto ⇒ VERDE 16·17·18·19·20. `test_696_retencion_notificaciones` adaptado (write_date viejo; FAILED reintentable se conserva).
+**Corte operativo hasta tener 26.338 instalado:** `meli_oerp.notification_days=0` apaga el GC.
+
 ## 29 oct 2026 — el contacto de facturación mezclaba la dirección: estado del ENVÍO + calle/ciudad/CP de FACTURACIÓN [hallazgo de 535 #696] (v19.0.26.335)
 **Síntoma:** contacto de facturación (y el principal cuando hace de facturación: estrategia B / sin hijo) con calle, ciudad y CP de `billing_info` y el estado de la dirección de envío ⇒ domicilio fiscal inexistente (CFDI MX, provincia AR).
 **Causa:** `models/orders.py::state()` devuelve el estado del `Receiver` apenas matchea su código, sin mirar `billing_info.STATE_NAME`; `street()`/`city()`/`zip_code()` sí priorizan billing. Usado así en `meli_buyer_fields` (alta del principal), BILLING_SPLIT (dirección del hijo de facturación) y `parent_update`. Además `STATE_NAME=''` (v2 normalizado) hacía `name ilike ''` ⇒ primer estado del país.

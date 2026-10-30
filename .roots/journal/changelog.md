@@ -4,6 +4,15 @@
 
 ---
 
+## 19.0.26.342 — 30-oct-2026 · Corrección del envío cobrado y opción para el cupón del vendedor
+- **meli_oerp (envío):** la línea de envío de una venta lleva sólo el flete que efectivamente pagó el comprador y cobró el vendedor. Un pago de envío de Mercado Pago en el que el vendedor es quien paga (o que cobra otro) ya no se suma a la venta.
+- **meli_oerp (cupón del vendedor):** nuevo parámetro del sistema `meli_oerp.seller_coupon_mode`. Con `discount` (valor por defecto, igual que hasta ahora) la venta queda en el precio de los artículos menos el cupón que financia el vendedor; con `collected` queda en lo cobrado por Mercado Pago y el cupón no se resta. Se puede fijar por compañía con `meli_oerp.seller_coupon_mode.company_<id>`.
+
+## 19.0.26.338 — 29-oct-2026 · Corrección: la limpieza automática de notificaciones de MercadoLibre ya no puede trabar ni demorar la importación de ventas
+- **meli_oerp (#696, limpieza):** la tarea diaria que borra notificaciones viejas trabaja por tandas cortas y saltea las que otro proceso está usando en ese momento (las toma la vuelta siguiente), en vez de esperarlas o hacer fallar al proceso de ventas. Tampoco borra las que el proceso de órdenes todavía puede reintentar (con error y menos de 24 intentos), las de una venta con avisos pendientes, ni las modificadas en las últimas 24 horas.
+
+## 19.0.26.337 — 29-oct-2026 · Release de flota 26.337 (acompaña la corrección de meli_oerp_multiple: la actualización de stock publica cada variante en UNA sola variación de Mercado Libre; sin cambios propios)
+
 ## 19.0.26.335 — 29-oct-2026 · Release de flota 26.335 (acompaña la novedad de meli_oerp_accounting: retenciones de MercadoPago registradas en el cobro del cliente, opcional por compañía)
 - **meli_oerp (#696):** las notificaciones de MercadoLibre ya procesadas (correctas o con error) se borran solas pasados 90 días — parámetro del sistema `meli_oerp.notification_days` (0 = no borrar nunca); las pendientes no se tocan. El registro del servidor deja de anotar en cada venta importada el JSON completo y el detalle de contactos/facturación (pasa a nivel DEBUG).
 - **meli_oerp (#696, contactos):** volver a importar una venta sin cambios ya no reescribe los contactos del comprador: el contacto de entrega dejaba de alternar el código postal en cada actualización (se borraba y se volvía a escribir, y cada cambio quedaba como mensaje de seguimiento en el contacto); un dato que no viene en la actualización ya no borra el guardado, y la lista de precios del comprador sólo se escribe si cambia.

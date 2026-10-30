@@ -39,3 +39,7 @@ from . import test_696_retencion_notificaciones
 from . import test_696_contacto_sin_writes_redundantes
 from . import test_billing_address_misma_fuente
 from . import test_cancel_guarda_entregada
+from . import test_gc_notificaciones_lock
+from . import test_26339_w5_fabricante
+from . import test_26341_stock_diag_presupuesto
+from . import test_26342_cupon_modo
