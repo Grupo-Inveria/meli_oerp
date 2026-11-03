@@ -2021,6 +2021,10 @@ class sale_order(models.Model):
         elif d['invoice'] == _meli_cd.INV_MANUAL:
             meli_message_post(self, "⚠️ ACCIÓN REQUERIDA (cancelación de ML): la factura se gestiona a mano. %s" % d['text'],
                               config=config, once_key="cancel-inv-manual-%s-%s" % (self.id, sig))
+            # 26.354 (153): con factura publicada, además la actividad (antes sólo chatter).
+            self._meli_cancel_review_posted_invoices(
+                d['text'] + (self._meli_cancel_is_pack_splitted(order_json=order_json)
+                             and self._meli_pack_splitted_twins_text() or ''), config=config)
 
         # 5. VENTA.
         if d['so'] == _meli_cd.SO_HOLD:
@@ -2035,6 +2039,8 @@ class sale_order(models.Model):
                 "Gestionar manualmente. Motivo ML: %s" % (len(unresolved), ", ".join(unresolved.mapped('name')), cancel_msg),
                 config=config,
                 once_key="cancel-posted-inv-%s" % "_".join(str(i) for i in sorted(unresolved.ids)))
+            # 26.354 (153): con factura publicada, además la actividad (antes sólo chatter).
+            self._meli_cancel_review_posted_invoices(cancel_msg, config=config)
             return False
         return self._meli_cancel_finish(cancel_msg)
 
@@ -2181,6 +2187,9 @@ class sale_order(models.Model):
                 ),
                 once_key="cancel-posted-inv-%s" % "_".join(str(i) for i in sorted(posted_invoices.ids)),
             )
+            # 26.354 (153): con factura publicada, además la actividad (antes sólo chatter,
+            # salvo la mediación con la política por motivo).
+            self._meli_cancel_review_posted_invoices(cancel_msg)
 
         if _has_unresolved_posted_invoice:
             _logger.warning("meli_cancel_with_detail: orden %s NO cancelada — factura publicada sin resolver. Acción manual requerida.", self.name)
@@ -2456,11 +2465,25 @@ class sale_order(models.Model):
             # 26.278 (#caso-K04): con la politica por motivo, ademas una actividad (el aviso que se
             # ve en el tablero). Sin devolucion automatica: decision del coordinador (la gemela
             # sigue viva). Si la gemela tiene su propia salida, la de esta venta sobra.
+            # 26.354 (153, 2-nov-2026): con FACTURA PUBLICADA la actividad va SIEMPRE, con o sin
+            # la politica por motivo (el default no la creaba y el aviso quedaba sólo en el
+            # chatter: en un cliente la gemela se facturó encima => doble factura con CAE). Nunca
+            # nota de crédito automática: es una decisión fiscal del vendedor.
+            parts = []
+            if unresolved:
+                parts.append(
+                    "Pack dividido por MercadoLibre con factura publicada (%s): ML re-creó la venta con otro "
+                    "número y la venta gemela NO se factura sola mientras esta factura siga vigente. Decidir: "
+                    "emitir la nota de crédito sobre esta factura y facturar la gemela, o conservar esta "
+                    "factura como la de la operación (y no facturar la gemela)." % ", ".join(unresolved.mapped('name')))
             if self._meli_cancel_policy_on():
-                self._meli_cancel_schedule_review(
-                    "Pack dividido por MercadoLibre: revisar si esta venta y su gemela sacaron la "
-                    "mercadería dos veces. Si la gemela tiene su propia salida, devolver la salida de "
-                    "esta venta y cancelarla. %s" % text, config=config)
+                parts.append(
+                    "Revisar si esta venta y su gemela sacaron la mercadería dos veces. Si la gemela tiene "
+                    "su propia salida, devolver la salida de esta venta y cancelarla.")
+            if parts:
+                if not unresolved:
+                    parts[0] = "Pack dividido por MercadoLibre: " + parts[0][0].lower() + parts[0][1:]
+                self._meli_cancel_schedule_review("%s %s" % (" ".join(parts), text), config=config)
             return False
         text = ("pack dividido por MercadoLibre (pack_splitted): se cancela la venta sin devolución ni nota "
                 "de crédito (sin salida hecha ni factura publicada).")
@@ -2516,6 +2539,23 @@ class sale_order(models.Model):
         except Exception as e:
             _logger.warning("meli_cancel %s: no se pudo crear la actividad de revisión: %s", self.name, e)
             return False
+
+    def _meli_cancel_review_posted_invoices(self, detail, config=None):
+        """26.354 (153, 2-nov-2026): cancelación de ML que dejó facturas publicadas sin revertir
+        => actividad 'Revisar cancelación de MercadoLibre' (UNA por venta), con o sin la política
+        por motivo. Hasta 26.353 estos caminos sólo escribían en el chatter y el aviso se perdía.
+        Nunca crea la nota de crédito: la decisión fiscal es del vendedor. Si la factura ya está
+        marcada para revisión fiscal (MX, meli_oerp_accounting) esa marca trae su propia actividad."""
+        self.ensure_one()
+        unresolved = self._meli_unresolved_posted_invoices()
+        if not unresolved:
+            return False
+        if 'meli_cancel_fiscal_review' in self._fields and self.meli_cancel_fiscal_review:
+            return False
+        return self._meli_cancel_schedule_review(
+            "Cancelación de MercadoLibre con factura publicada sin revertir (%s): la venta no se canceló. "
+            "Decidir: emitir la nota de crédito y cancelar la venta, o conservar la factura si la venta "
+            "sigue en pie. %s" % (", ".join(unresolved.mapped('name')), detail or ''), config=config)
 
     def _meli_pack_splitted_twins(self):
         """Ventas de Odoo que ML creó al dividir el pack: mismo comprador, algún ítem en común,
@@ -4967,6 +5007,43 @@ class mercadolibre_orders(models.Model):
 
         return order_item_impuesto_interno
 
+    def _meli_ar_default_consumidor_final(self, partner, company=None):
+        """#153: comprador AR sin documento en billing_info ⇒ Consumidor Final + 'Sigd'.
+
+        Sin documento la factura va al contacto principal, que se crea sin datos fiscales
+        (tipo 'VAT' por default de l10n_latam_base, responsabilidad vacía) y ARCA la rechaza.
+        Sólo actúa si la compañía es AR, l10n_ar está instalado y el contacto comercial no tiene
+        ni responsabilidad ni vat: un contacto con DNI/CUIT o con responsabilidad cargada no se toca.
+        Nunca rompe el import. Devuelve True si escribió.
+        """
+        company = company or self.env.company
+        if not partner or not company or (company.country_id.code or '') != 'AR':
+            return False
+        Partner = self.env['res.partner']
+        if ('l10n_ar_afip_responsibility_type_id' not in Partner._fields
+                or 'l10n_latam_identification_type_id' not in Partner._fields):
+            return False
+        target = partner.commercial_partner_id or partner
+        if target.l10n_ar_afip_responsibility_type_id or (target.vat or '').strip():
+            return False
+        res_cf = self.env.ref('l10n_ar.res_CF', raise_if_not_found=False)
+        it_sigd = self.env.ref('l10n_ar.it_Sigd', raise_if_not_found=False)
+        vals = {}
+        if res_cf:
+            vals['l10n_ar_afip_responsibility_type_id'] = res_cf.id
+        if it_sigd and target.l10n_latam_identification_type_id != it_sigd:
+            vals['l10n_latam_identification_type_id'] = it_sigd.id
+        if not vals:
+            return False
+        try:
+            with self.env.cr.savepoint():
+                target.write(vals)
+            _logger.info("MELI_AR_CF_SIN_DOC: contacto id:%s sin documento ⇒ Consumidor Final + Sigd", target.id)
+            return True
+        except Exception as e:
+            _logger.warning("MELI_AR_CF_SIN_DOC: no se pudo marcar CF al contacto id:%s: %s", target.id, e)
+            return False
+
     def orders_update_order_json( self, data, context=None, config=None, meli=None ):
 
         oid = data["id"]
@@ -6352,6 +6429,9 @@ class mercadolibre_orders(models.Model):
             # Si no hay VAT en billing_info, usar contacto principal para facturación
             if not partner_invoice_id:
                 partner_invoice_id = partner_id
+                # #153: sin documento ⇒ AR: Consumidor Final + Sigd (si no tiene datos fiscales)
+                if partner_invoice_id:
+                    self._meli_ar_default_consumidor_final(partner_invoice_id, company)
 
             # fe_habilitada va al contacto que se usa para facturación
             if partner_invoice_id:
@@ -7249,6 +7329,7 @@ class mercadolibre_orders(models.Model):
                         fee_details = payment_fields["full_payment"]["charges_details"]
                         
                         payment_fields["fee_amount"] = 0
+                        _commission_found = False  # [26.361] ver meli_payment_commission_from_json
 
                         for fee_detail in fee_details:
                             
@@ -7263,6 +7344,8 @@ class mercadolibre_orders(models.Model):
                                 if ( fee_type=="fee" and (fee_name == "meli_percentage_fee" or fee_name=="flat_fee" or fee_name=="financing_add_on_fee" ) ):
                                     payment_fields["fee_amount"]+= fee_detail["amounts"] and fee_detail["amounts"]["original"]
                                     #_logger.info("fee_amount:"+str(payment_fields["fee_amount"]))
+                                    if fee_detail["amounts"] and fee_detail["amounts"].get("original"):
+                                        _commission_found = True
                                     if (order):
                                         order.fee_amount = payment_fields["fee_amount"]
 
@@ -7293,6 +7376,15 @@ class mercadolibre_orders(models.Model):
                                 #    payment_fields["financing_fee_amount"] = fee_detail["amount"]
                                 #    if ('status' in Payment and Payment['status'] == "approved"):
                                 #        financing_fee_amount+= payment_fields["financing_fee_amount"]
+
+                        # [26.361] 430 OFF 720: ningun cargo con nombre conocido (MP ahora informa
+                        # `meli_fee`) => no dejar la comision en 0: se toma de fee_details / cargos fee.
+                        if not _commission_found:
+                            _fb_fee = meli_payment_commission_from_json(payment_fields["full_payment"])
+                            if _fb_fee > 0.0:
+                                payment_fields["fee_amount"] += _fb_fee
+                                if (order):
+                                    order.fee_amount = payment_fields["fee_amount"]
 
                         if (order):
                             order.financing_fee_amount = financing_fee_amount

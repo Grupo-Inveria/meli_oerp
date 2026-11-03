@@ -4,6 +4,17 @@
 
 ---
 
+## 2 nov 2026 — comisión del pago en 0 cuando MP informa `meli_fee` [430 Aztec Medic, OFF 720] (v19.0.26.361)
+**Causa:** bloque payments de la ingesta: con charges_details se pone fee_amount=0 y sólo se suman cargos fee con nombre meli_percentage_fee/flat_fee/financing_add_on_fee; MP informa ahora `meli_fee` (deferred-charges/fees-api) ⇒ comisión 0 aunque fee_details application_fee=300.3.
+**Fix:** si ningún cargo de nombre conocido aportó comisión, `meli_payment_commission_from_json` (versions.py): fee_details application_fee collector; si no, cargos type=fee from collector sin financing_fee. Con nombres conocidos no cambia nada. Test en meli_oerp_accounting (TestComisionDesdeJson26361).
+
+## 2 nov 2026 — cancelación de ML con factura publicada: actividad SIEMPRE [153 BA Vending, pack_splitted] (v19.0.26.354)
+**Síntoma:** ML canceló 3 órdenes con `internal / pack_splitted / meli` y las re-creó (mismo comprador, ítem MLA2512253164, 68.890): 2000019270134014→2000019281411680, 2000019276075288→2000019289037380, 2000019281735806→2000019289046854. Las originales tenían factura publicada (CAE); la venta original quedó abierta (por diseño, 26.171) con aviso SÓLO en el chatter y la gemela se facturó encima.
+**Causa:** `_meli_cancel_pack_splitted_legacy` creaba la actividad sólo con `meli_oerp.cancel_reason_policy=by_reason` (BA no lo tiene). Lo mismo en el legacy genérico (factura que no vuelve a borrador) y en `por_estado_ml` (INV_MANUAL / paso 5): sólo chatter.
+**Fix:** `_meli_cancel_review_posted_invoices`: con factura publicada sin revertir ⇒ actividad 'Revisar cancelación de MercadoLibre' (una por venta, nombra factura y gemela), independiente de la política. pack_splitted: texto "NC sobre esta factura y facturar la gemela, o conservarla y no facturar la gemela". Nunca NC automática. Sin factura ni salida: se cancela como antes. Si la venta está marcada `meli_cancel_fiscal_review` (MX) no se duplica la actividad. La guarda que impide facturar la gemela está en meli_oerp_accounting 26.354.
+**No cubre (sólo chatter, sin factura en juego o retención deliberada):** `_meli_cancel_hold_by_cutoff`, `_meli_cancel_hold_partial_pack`, `_meli_cancel_hold_delivered_or_paid`.
+**Prueba:** `tests/test_26354_cancel_actividad_factura.py` (tag meli_26354, 3; los 3 casos reales sin política). Banco 16/17/18/19/20 verde (+ regresión TestCancelPorMotivo); control sin fix (19): 2/3 rojos. 20.0: `test_26278...test_politica_apagada_mediacion_cubierta_queda_retenida_26335` falla por `ICP.set_param` inexistente en Odoo 20 (preexistente, ajeno).
+
 ## 30 oct 2026 — flete del envío: sólo lo que COBRA el vendedor · descuento del vendedor configurable por cliente [caso-K22 535 / caso-K02 158 / caso-K13 431] (v19.0.26.342)
 **Síntoma (caso-K22, tras el pase a 26.335):** SO 181677 = 188 + 53 de envío con la orden ML cobrada en 188 (pago con shipping 0); SO 181678 y 181690
 quedaron por debajo de lo cobrado por MercadoPago (436,99 → 403,59; 589,27 → 550,97) por el cupón del vendedor restado (26.330). caso-K02: packs con
@@ -1834,3 +1845,9 @@ cambio para el resto); `_product_post` pasa `plist=_meli_resolve_new_pricelist(f
 **Tests:** `meli_oerp_multiple/tests/test_26334_lista_ml_y_aviso_atributos.py` (tag meli_26334, 5 casos).
 Fix 5/5 en 16-19; control origin 26.333 en 18: 5 FAIL de 5. Suites /meli_oerp,/meli_oerp_multiple: 18 0/293,
 17 0/329, 19 0/280; 16 0F+3E/333 (test_meli_cancel: base sin plan contable, ajeno).
+
+## 26.348 (2-nov-2026) — #543 transportista de OTRA compañía en venta ML multiempresa
+- **Síntoma:** cía 2 recibe venta con envío "Estándar"; el único carrier con ese nombre es de la cía 1 ⇒ `sorder.carrier_id = …` levanta UserError "company inconsistencies" ⇒ se revierte la importación entera (ni `mercadolibre.orders`).
+- **Causa:** `_update_sale_order_shipping_info` 2º fallback `delivery.carrier.search([name])` SIN filtro de compañía (`order company_id asc` ⇒ gana la 1); mismo patrón en `_meli_find_shipping_product` (paso 2); `resolve_carrier` devolvía el carrier de un mapeo compartido aunque fuera de otra cía; el create usaba `self.company_id` (recordset).
+- **Fix:** helpers `meli_carrier_by_name` (cía del pedido ⇒ compartido, nunca otra) y `meli_carrier_company_ok`; la compañía es la del PEDIDO (`sorder.company_id`); el carrier nuevo se crea en esa compañía.
+- **Test:** `tests/test_26348_carrier_compania.py` (7). Sin el fix reproduce el UserError de producción.

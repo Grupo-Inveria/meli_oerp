@@ -43,3 +43,7 @@ from . import test_gc_notificaciones_lock
 from . import test_26339_w5_fabricante
 from . import test_26341_stock_diag_presupuesto
 from . import test_26342_cupon_modo
+from . import test_26354_cancel_actividad_factura
+from . import test_26347_cf_sin_doc
+from . import test_26348_carrier_compania
+from . import test_26350_envio_costo

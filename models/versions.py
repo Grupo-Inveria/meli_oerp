@@ -834,6 +834,25 @@ def meli_resolve_coupon_invoice_mode(config):
     return "full"
 
 
+def meli_shipping_cost_as_purchase_price(config):
+    """True si el flete de ML debe imputarse como COSTE (purchase_price) en la linea de envio.
+
+    Campo: mercadolibre_shipping_cost_as_purchase_price (meli_oerp_multiple, configuracion de la
+    cuenta). Default True = comportamiento historico: la linea de envio lleva como coste el flete
+    que ML le cobra al vendedor (shipping_seller_cost) y el margen del pedido lo descuenta.
+
+    En False la linea de envio se sigue creando y facturando EXACTAMENTE igual, pero queda sin
+    coste -> el margen del pedido no descuenta el flete (#507 / #715 Score-WOD PRO: el control
+    vivia solo en el repo del cliente y un sync del source lo borro; 26.350 lo sube al source).
+
+    Compat: si el campo no existe (meli_oerp solo, sin multiple, o config que no lo define) se
+    devuelve True, o sea, nada cambia.
+    """
+    if not config or "mercadolibre_shipping_cost_as_purchase_price" not in config._fields:
+        return True
+    return bool(config.mercadolibre_shipping_cost_as_purchase_price)
+
+
 def _meli_line_tax_field(rec):
     return "tax_ids" if "tax_ids" in rec._fields else "tax_id"
 
@@ -1177,3 +1196,43 @@ def meli_money_block_post(record, body, config=None, once_key=None):
                     record and record.ids, body)
     if record and hasattr(record, 'message_post'):
         meli_message_post(record, body, config=config, once_key=once_key, force_chatter=True)
+
+
+def meli_payment_commission_from_json(full_payment):
+    """[26.361] Comision de MercadoLibre de un pago de MercadoPago, para cuando la suma de los
+    cargos con nombre conocido (meli_percentage_fee / flat_fee / financing_add_on_fee) da 0.
+
+    Caso 430 (OFF 720, 2-nov-2026): MercadoPago empezo a informar la comision en charges_details
+    con el nombre `meli_fee` (source deferred-charges/fees-api). La ingesta ponia fee_amount=0 al
+    ver charges_details y solo sumaba los nombres conocidos: el pago quedaba con comision 0 aunque
+    fee_details dijera 300.30, y el pago a proveedor de comision se creaba por 0.00.
+
+    Orden: (1) fee_details application_fee que paga el vendedor (collector); (2) si no hay,
+    cargos type=fee que salen del vendedor, sin `financing_fee` (financiacion en cuotas: no es
+    comision). Devuelve 0.0 si no hay nada; nunca un negativo."""
+    fp = full_payment if isinstance(full_payment, dict) else {}
+    total = 0.0
+    for fd in (fp.get("fee_details") or []):
+        if not isinstance(fd, dict):
+            continue
+        if fd.get("type") == "application_fee" and fd.get("fee_payer") == "collector":
+            try:
+                total += float(fd.get("amount") or 0.0)
+            except (TypeError, ValueError):
+                pass
+    if total > 0.0:
+        return round(total, 2)
+    total = 0.0
+    for ch in (fp.get("charges_details") or []):
+        if not isinstance(ch, dict) or ch.get("type") != "fee":
+            continue
+        if (ch.get("name") or "").strip().lower() == "financing_fee":
+            continue
+        acc_from = (ch.get("accounts") or {}).get("from")
+        if acc_from and acc_from != "collector":
+            continue
+        try:
+            total += float((ch.get("amounts") or {}).get("original") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    return round(total, 2) if total > 0.0 else 0.0
