@@ -2829,9 +2829,25 @@ class sale_order(models.Model):
         """
         repaired = 0
         skipped = 0
+        skipped_cancelled = 0
         for so in self:
             if so.state not in ('sale', 'done'):
                 skipped += 1
+                continue
+            # 157 (Hito, Smarttrack #5121): una venta CANCELADA en ML que en Odoo
+            # sigue en sale/done (la cancelacion no se pudo aplicar: _meli_action_cancel
+            # "NO quedo cancelada", banner meli_cancel_pending_banner) suele tener los
+            # moves huerfanos de la entrega cancelada. Repararla le RE-CREA el albaran y
+            # la mercaderia vuelve a reservarse/despacharse para una venta que ML ya no
+            # cobra. La cancelacion se resuelve por su flujo (meli_cancel_with_detail);
+            # aca no se repara.
+            if so.meli_status == 'cancelled':
+                skipped += 1
+                skipped_cancelled += 1
+                _logger.info(
+                    "meli_repair_missing_pickings: SO %s (id=%d) cancelada en ML (meli_status=cancelled) — no se re-crea la entrega",
+                    so.name, so.id
+                )
                 continue
             orphan_moves = self.env['stock.move'].search([
                 ('picking_id', '=', False),
@@ -2862,6 +2878,9 @@ class sale_order(models.Model):
         if repaired:
             msg = "Entrega reparada correctamente. Recargá la página para ver el botón de entrega."
             msg_type = 'success'
+        elif skipped_cancelled:
+            msg = "La venta está cancelada en MercadoLibre: no se re-crea la entrega. Procesá la cancelación."
+            msg_type = 'warning'
         else:
             msg = "No se encontraron movimientos de stock huérfanos para reparar."
             msg_type = 'warning'
@@ -3439,7 +3458,8 @@ class sale_order(models.Model):
             if order.meli_orders:
                 res = order.meli_orders[0].orders_update_order()
             # Auto-repair: if SO is confirmed but has no picking, fix orphan moves
-            if order.state in ('sale', 'done') and not order.picking_ids:
+            # 157 (Hito): nunca para una venta cancelada en ML (ver meli_repair_missing_pickings).
+            if order.state in ('sale', 'done') and not order.picking_ids and order.meli_status != 'cancelled':
                 orphan = self.env['stock.move'].search([
                     ('picking_id', '=', False),
                     ('state', 'in', ['confirmed', 'waiting', 'partially_available', 'assigned']),
@@ -4707,6 +4727,15 @@ class mercadolibre_orders(models.Model):
         upd_line = {
             "price_unit": ml_product_price_conversion( self, product_related_obj=product_related_obj, price=unit_price, config=config )
         }
+        # [#462 OLPA, SO 6212] Odoo 17.2+/18: una linea creada con price_unit en los vals queda con
+        # technical_price_unit == price_unit, y Odoo lo lee como "precio NO fijado a mano": cualquier
+        # write posterior de product_id / product_uom_qty / product_uom (aunque sea el mismo valor)
+        # recomputa price_unit a la tarifa/list_price (SO 6212: 133.881 -> 183.912 s/IVA). El precio
+        # viene de ML y no debe recomputarse: se arma la marca de "fijado a mano"
+        # (technical_price_unit != price_unit). -1.0 no es un precio computable. Reproducido en Odoo 18
+        # core; donde el campo no existe (16.0) no se agrega.
+        if "technical_price_unit" in self.env["sale.order.line"]._fields:
+            upd_line["technical_price_unit"] = -1.0
         #else:
         #    if ( float(Item['unit_price']) == product_template.lst_price and not self.env.user.has_group('sale.group_show_price_subtotal')):
         #        upd_line[tax_field] = None
@@ -6772,6 +6801,11 @@ class mercadolibre_orders(models.Model):
                 # el descuento del vendedor, el control de importe (meli_amount_to_invoice) deja de
                 # coincidir con el precio de sus lineas y la venta queda trabada sin facturar.
                 meli_order_fields.pop('meli_discount_seller_amount', None)
+            elif meli_order_fields.get("pricelist_id") == sorder.pricelist_id.id:
+                # [#462 OLPA] No reescribir la lista con el MISMO valor: un modulo con
+                # @api.depends('order_id.pricelist_id') en el compute de price_unit (Olpa:
+                # website_sale_pricelist_rules) recomputa todas las lineas aun asi (SO 6212).
+                del meli_order_fields["pricelist_id"]
             #_logger.info(meli_order_fields)
             sorder.meli_fix_team( meli=meli, config=config )
             for k in [k for k in meli_order_fields if k not in sorder._fields]:
