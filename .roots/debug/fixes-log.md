@@ -4,6 +4,30 @@
 
 ---
 
+## 5 nov 2026 — 26.379: tope de espera del envío desconocido 6 h → 1 h por default `[19.0]`
+
+**Archivos:** `models/orders.py` (`MELI_WAIT_SHIPMENT_DEFAULT_HOURS`).
+**Origen:** 420 #707 — el cliente pidió bajar el tope: 6 h en presupuesto atrasan la entrega y afectan la reputación.
+**Fix:** default 6.0 → 1.0. El ICP `meli_oerp.confirm_wait_shipment_hours` manda si existe (get_param con default).
+**Tests:** meli_oerp_sale_order_type `tests/test_420_707_tope_1h.py` (L 90 min confirma · M 30 min espera · N ICP=6 manda).
+
+---
+
+## 5 nov 2026 — 26.377: confirm_ml espera el envío cuando su tipo logístico es desconocido `[19.0]`
+
+**Archivos:** `models/orders.py` (`meli_confirm_wait_shipment`, llamada en `confirm_ml` después de `meli_confirm_ready`).
+**Origen:** 420 #707 (duda del dev del cliente): con `meli_shipping_id` y `meli_shipment_logistic_type` vacío (falló
+fetch_shipment en el alta; un envío leído siempre deja `logistic_type or mode`) `is_meli_order_fulfillment()` daba False
+⇒ confirmación con la regla NO FULL ⇒ una FULL reservaba stock propio y `_meli_sot_fix_provisional_type`
+(meli_oerp_sale_order_type) ya no podía corregir el tipo porque la venta estaba confirmada.
+**Fix:** draft/sent + shipping.id + sin tipo ⇒ `{'error'}` + nota única (once_key `wait-shipment-<id>`); tope
+`meli_oerp.confirm_wait_shipment_hours` (default 6 h desde create_date; 0 = sin espera) ⇒ confirma NO FULL + aviso
+(once_key `wait-shipment-limit-<id>`). Sin llamadas de red nuevas (Shoppy 502: nada de red dentro de la transacción).
+**Re-intento:** lo hace la próxima actualización de la orden (notificación de ML / cron de órdenes), que vuelve a leer el envío.
+**Tests:** meli_oerp_sale_order_type `tests/test_420_707_guarda_envio.py` (A-F, camino real con meli_oerp_multiple y cuenta enlazada).
+
+---
+
 ## 4 nov 2026 — venta cancelada en ML que sigue en sale/done: la reparación de entregas le re-creaba el albarán [157 Hito Fusion, Smarttrack #5121] (v19.0.26.374)
 **Síntoma (reportado por Hito, partner, con módulo puente propio `meli_cancel_guard`):** órdenes que ML canceló vuelven a tener albarán listo para despachar.
 **Causa:** cuando la cancelación de ML no se puede aplicar en Odoo (`_meli_action_cancel` "NO quedó cancelada"; banner `meli_cancel_pending_banner`), la venta queda `state=sale` con `meli_status=cancelled` y, si la entrega se canceló/borró, con `stock.move` huérfanos (`picking_id` NULL). `meli_repair_missing_pickings` sólo salteaba por `state` de Odoo y la auto-reparación de `meli_oerp_update` (`state in sale/done and not picking_ids`) la disparaba en cada actualización ⇒ `_assign_picking()` re-creaba el albarán. (`confirm_ml` ya cortaba antes para canceladas.)
@@ -286,6 +310,10 @@ reescrito; lo de SteelTigers vive en su módulo `steeltiger_meli_contacts` (here
 **Causa:** todo el matching del suite es exacto (`default_code =ilike sku`).
 **Fix:** opción `mercadolibre_sku_token_match` (+ `_separators`), default apagada, como RESPALDO después del exacto. Helper único: `models/sku_token.py` (regla pura) + `product.product._meli_sku_token_resolve/_matches` (ORM; apagada ⇒ 0 queries). Puntos: `company.product_meli_get_products` (ítem y variación), `mercadolibre.orders.search_meli_product` y 2.º intento de `orders_update_order_json`.
 **Prueba:** banco Odoo 16, 17, 18 y 19 (PG privado, shell ORM 39/39 en CADA serie): test puro contra la lista medida de 543 (1338 filas, 0 discrepancias: 586 activas/415 pausadas resuelven) + shell ORM 39/39 (único, sin match, ambiguo de tokens, código duplicado, comodín `_` escapado, otra compañía, separador custom, opción apagada ⇒ resultados de hoy y 0 queries, `bind_to` real: apagada no crea binding de variante, encendida sí).
+### 5 nov 2026 — «acordar entrega» (no_shipping) vs envío todavía no creado [420 #707] (v19.0.26.378)
+
+`meli_order_no_shipping()` (tag `no_shipping` en todos los `meli_orders`) y `meli_confirm_wait_shipment`: sin shipping.id + no_shipping ⇒ no espera; sin shipping.id y sin la marca ⇒ espera con el mismo tope. Verificado en prod Dannok (GET /orders RO): 31006/31896 = `{"id": null}` + `no_shipping`; 32221 = `{"id": null}` sin la marca; `context.flows` no discrimina. Antes (26.377) toda venta sin shipping.id confirmaba al instante como no FULL. sale_order_type marca el tipo como provisorio en ese caso. Banco 18 (cliente): control 4 FAIL (I,J,K,F), fix 27/27, suite 48/48.
+
 ### 6 oct 2026 — Precisión "Product Price" a 6 dígitos ahora es opcional [#542 SteelTiger / #659] (v19.0.26.193)
 
 `__init__.py` `post_init_hook`: forzaba 'Product Price' a 6 dígitos al instalar. Ahora lee el parámetro de sistema

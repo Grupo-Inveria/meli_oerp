@@ -4,6 +4,22 @@
 
 ---
 
+## 19.0.26.379 — 5-nov-2026 · Tope de espera del envío desconocido: 6 h → 1 h por default (420)
+- Una venta con envío todavía desconocido espera como máximo **1 h** (antes 6 h) antes de confirmarse con la regla no FULL. El parámetro `meli_oerp.confirm_wait_shipment_hours` sigue mandando si existe en la base.
+
+---
+
+## 19.0.26.378 — 5-nov-2026 · Las ventas «acordar la entrega» se confirman al instante; una venta cuyo envío todavía no existe espera (420 #707)
+
+Mercado Libre marca las ventas sin envío («acordar la entrega» con el comprador) con `shipping.id` nulo y la etiqueta `no_shipping`: esas se confirman en el alta con la regla no FULL, sin esperar. Una venta **sin `shipping.id` y sin esa etiqueta** (el envío todavía no fue creado y podría ser FULL) ahora espera en presupuesto como la venta con envío sin leer, con el mismo tope (`meli_oerp.confirm_wait_shipment_hours`, 6 h); antes se confirmaba al instante como no FULL.
+
+---
+
+## 19.0.26.377 — 5-nov-2026 · Una venta de Mercado Libre con envío de tipo desconocido espera en presupuesto antes de confirmarse (420 #707)
+- Si la venta tiene envío pero su tipo logístico todavía no se conoce (falló la consulta del envío al entrar), **ya no se confirma**: queda en presupuesto con una nota en el chatter. La siguiente actualización de la orden lee el envío y recién ahí confirma con la regla FULL o no FULL que corresponda. Antes una venta FULL se confirmaba con la regla no FULL y reservaba stock del depósito propio.
+- **Tope:** parámetro de sistema `meli_oerp.confirm_wait_shipment_hours` (default **6 h** desde que la venta se creó en Odoo; `0` = sin espera, como antes). Vencido el tope se confirma con la regla no FULL y se avisa en el chatter para revisar tipo de pedido y depósito.
+- Ventas sin envío de ML (acordar con el comprador) no esperan. Sin llamadas de red nuevas. Requiere `-u meli_oerp`.
+
 ## 19.0.26.373 — 4-nov-2026 · Ventas de ML: el precio de la línea ya no se recalcula a la tarifa; diagnóstico de stock más robusto; KIT de ML (462)
 - El precio de una línea de venta que viene de Mercado Libre queda fijo: cambiar la cantidad o el producto de la línea ya no lo recalcula con la lista de precios (Odoo 17.2+/18). Tampoco se reescribe la lista de precios de la venta cuando es la misma.
 - El diagnóstico de stock ya no pierde la corrida entera si choca con el cron de stock al guardar el estado de una publicación.
