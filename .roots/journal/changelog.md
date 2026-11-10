@@ -4,6 +4,30 @@
 
 ---
 
+## 19.0.26.391 — 10-nov-2026 · Una venta pagada sin precio informado por Mercado Libre ya no queda vacía
+- Si Mercado Libre informa una venta pagada **sin el precio del producto** (ni el total), la venta igual se importa: con un solo producto, el precio se toma del **pago aprobado**. Antes la venta quedaba en presupuesto, en $0 y sin líneas, y volver a importarla repetía el error.
+- Si la venta tiene **varios productos sin precio**, no se reparte el pago a ciegas: las líneas se crean en $0, se deja un aviso en la venta («ML no informó el precio del ítem») y la venta no se confirma sola hasta que se revise el precio.
+- El motivo de «venta incompleta» ahora distingue **«ML no informó el precio del ítem»** de **«producto no encontrado (SKU sin vincular)»**: antes decía SKU sin vincular aunque el producto sí estuviera vinculado.
+
+---
+
+## 19.0.26.389 — 9-nov-2026 · Ventas que entran por código de barras · reintento de órdenes sin productos
+- Si el SKU de la publicación es un código de barras (o la publicación no tiene SKU pero declara su GTIN), la venta encuentra el producto por su **código de barras**, aunque esté cargado con otro largo (por ejemplo `07502300970043` en Mercado Libre y `7502300970043` en Odoo). Solo se vincula si hay **un único** producto con ese código.
+- Las órdenes de Mercado Libre que quedaron **sin productos** se vuelven a importar solas: unas pocas por corrida del cron de órdenes, hasta 5 intentos cada una.
+
+---
+
+## 19.0.26.387 — 9-nov-2026 · Las ventas de Mercado Libre no toman el descuento de la tarifa
+- Si la tarifa de Mercado Libre tiene una regla de descuento en % para un producto, la línea de la venta ya no hereda ese descuento: el precio es el que cobró Mercado Libre y la venta cuadra con lo pagado (antes quedaba en presupuesto). Re-sincronizar tampoco lo reintroduce, y los descuentos cargados a mano se conservan.
+
+---
+
+## 19.0.26.386 — 9-nov-2026 · Carrito: no se pierde el último ítem barato · tope opcional del descuento al cupón
+- En un carrito con cupón, el último producto más barato que el cupón ya no queda afuera de la venta: la línea entra si cabe en lo pagado. Si no entra, se avisa en la venta. Las sub-órdenes canceladas por Mercado Libre no agregan línea.
+- Nuevo parámetro opcional `meli_oerp.seller_discount_cap_coupon` (por compañía con `.company_<id>`): acota el descuento del vendedor al cupón de la orden. Apagado por defecto (sin cambios para quien no lo active).
+
+---
+
 ## 19.0.26.384 — 8-nov-2026 · Release de flota 26.384 (acompaña los cambios de meli_oerp_multiple: re-vincular mantiene la lista «Bindings» (26.382) y una publicación bloqueada no se reactiva por el stock de su hermana (26.384); y de 26.383: validar entregas con KIT; sin cambios propios en 26.384)
 
 ---

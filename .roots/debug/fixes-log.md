@@ -4,6 +4,26 @@
 
 ---
 
+## 10 nov 2026 — 26.391: orden ML pagada con unit_price / total_amount / paid_amount nulos `[19.0]`
+**Síntoma:** ML devolvió una orden PAGADA con `total_amount`, `paid_amount` y `order_items[0].unit_price` = null (el pago en `payments[]` sí traía `transaction_amount` aprobado). `_set_product_unit_price` hacía `float(Item['unit_price'])` ⇒ `TypeError` ⇒ `orders_query_iterate > Error actualizando ORDEN` ⇒ venta draft, total 0, sin líneas; cada reimport repetía. El motivo de `meli_confirm_ready` decía "producto no encontrado (SKU sin vincular)" aunque el SKU matcheaba.
+**Fix:** `mercadolibre.orders._meli_fill_missing_amounts` (antes de `prepare_ml_order_vals`): un solo ítem sin precio + pago aprobado de ESA orden ⇒ unit_price = Σtransaction_amount / qty (sin volver a restar el descuento del vendedor: el pago ya es neto); varios ítems sin precio ⇒ NO se reparte, marca `_meli_unit_price_missing` ⇒ línea a 0 + aviso `once_key` en el chatter; total/paid nulos ⇒ desde ítems/pagos. `_set_product_unit_price` tolera None (precio 0, nunca negativo). `sale.order._meli_items_without_price` / `_meli_no_lines_reason`: `meli_confirm_ready` distingue "ML no informó el precio" / "SKU sin vincular" / "ML no informó los ítems", y no confirma con líneas sin precio de ML.
+**Prueba:** `tests/test_26391_unit_price_nulo.py` (meli_26391), sin red. Control en origin sin el fix: 1F+6E/7 (5 E = el mismo `TypeError float(None)` de producción); con el fix 0/7.
+
+## 9 nov 2026 — 26.389: match por barcode GTIN normalizado + reintento de órdenes sin items (deuda 515 Natural Dry, #442) `[19.0]`
+**Síntoma:** (1) SKU de ML `07502300970043` (GTIN-14) y barcode en Odoo `7502300970043` (EAN-13) ⇒ línea sin producto (515: 191 líneas medidas el 21-ago). El respaldo SKU→barcode de 2022 era igualdad exacta, y con `meli_oerp_multiple` ni corría (redefine `search_meli_product` sin barcode, `#TODO: 3RD attempt using barcode`). (2) `mercadolibre.orders` sin `order_items` no las reintentaba nadie (515: 257 de 270 con write_date = create_date).
+**Fix:** `models/gtin.py` (puro: `meli_gtin_keys`, `meli_item_gtins`, `meli_gtin_same`) + `models/meli_gtin.py`: `product.product._meli_search_by_barcode_gtin` (único o nada); `search_meli_product` base: fallback normalizado tras el exacto; `orders_update_order_json`: 3er intento = SKU como barcode y GTIN del aviso (variación vendida o aviso). `res.company._meli_search_by_barcode` (publicaciones): fallback normalizado. Campo `mercadolibre.orders.meli_items_retry_count` + `_meli_retry_orders_without_items` (5 por corrida, tope 5 intentos, commit por orden, rollback sólo de la que falla), enganchado en `res.company.cron_meli_orders` y en el cron por cuenta de multiple (paso 2b).
+**Prueba:** `tests/test_26389_515_barcode_gtin_y_reintento.py` (meli_26389_515), sin red. Control en origin sin el fix: 2F+4E/7 (stack) en 16–20; con el fix 0/7.
+
+## 9 nov 2026 — 26.387: la regla % de la tarifa no rebaja la línea de ML (#525 ROEN, SO 8152/7578) `[19.0]`
+**Síntoma:** tarifa de ML con regla `percentage 15` para un producto ⇒ `_compute_discount` volcaba 15 % a la línea creada con el precio de ML ⇒ venta 15 % por debajo de lo cobrado (700,11 vs 823,65) ⇒ "Condition not met" ⇒ venta en presupuesto. Re-sincronizar no lo corregía.
+**Fix:** `sale.order.line._meli_ml_line_create_vals` (create de la línea ML en `orders.py` y del pack en `shipment.py`): `discount 0.0` si no viene en los vals; el cupón de ML (modo product_discount) lo imputa después su bloque. `_meli_write_ml_line`: si el write (product/qty/uom) recomputó `discount` desde la tarifa, se restituye el previo (0, cupón o manual).
+**Prueba:** `tests/test_26387_525_ml_line_discount.py` (meli_26387_525), sin red. Control en origin sin el fix: 3F/5 (test_1 nace con 15, test_2 re-sync, test_4 manual) en 16–20; con el fix 0F/0E.
+
+## 9 nov 2026 — 26.386: #595 línea de carrito + tope del descuento al cupón (opt-in) — port de prod Shoppy 502 `[19.0]`
+**Síntoma:** prod 502 (26.239) tiene 3fb82c5a (F5b + #595) y el source no: instalar el source se lo sacaba. Guard viejo del carrito `amount_total < paid - (descuento or cupón)` dejaba afuera, sin aviso, el último ítem más barato que el cupón (ML 2000014963729457).
+**Fix:** `models/meli_prorate.py` (puro): `pack_line_fits` (la línea entra si cabe en lo PAGADO; sub-orden cancelada por ML no suma línea; si no entra, chatter con once_key) y `bounded_order_discount`. Tope al cupón = parámetro opt-in `meli_oerp.seller_discount_cap_coupon[.company_<id>]` aplicado en `_meli_apply_seller_coupon_mode` (donde se escribe `discount_seller_amount`: línea, pack y venta usan el mismo valor). El prorrateo de 3fb82c5a NO se trae: lo cubren 26.229/26.249/26.318.
+**Prueba:** `tests/test_26386_carrito_595.py` (meli_f5b, meli_26386). Odoo 16: control origin 1E (setUpClass) / fix 0F. Suites 26367/26354/26278/26306/f5b/524/K15 verdes en 16–19; 20: 1E preexistente de test_26278 (`ICP.set_param` no existe en Odoo 20, también en origin).
+
 ## 9 nov 2026 — 26.385: credenciales ML visibles sin modo desarrollador + Vendedor Id desde el login `[19.0]`
 
 **Archivos:** `views/company_view.xml`, `models/company.py` (`mercadolibre_redirect_uri_suggested`,

@@ -32,6 +32,7 @@ from .receiver_cost import shipping_missing_in_paid as _meli_shipping_missing_in
 from . import address_lock as _meli_addr
 from time import monotonic as _mono
 from .import_lock import meli_import_guard as _meli_import_guard
+from .gtin import meli_item_gtins
 
 # Traducción de códigos de cancelación ML → español
 _MELI_CANCEL_CODES_ES = {
@@ -203,6 +204,7 @@ from odoo.exceptions import ValidationError
 from . import posting
 from . import product
 from . import shipment
+from . import meli_prorate
 from dateutil.parser import *
 from datetime import *
 from urllib.request import urlopen
@@ -415,11 +417,32 @@ class sale_order_line(models.Model):
         """Write de la linea de producto ML desde la sincronizacion (ver bloque [#caso-K15, 26.316])."""
         for line in self:
             upd = line._meli_vals_changed(vals)
+            # [#525 SO 8152] write de product/cantidad/uom recomputa `discount` desde la tarifa
+            # (_compute_discount); se conserva el que tenia la linea (0 de ML, cupon o manual).
+            _disc_before = line.discount if 'discount' in line._fields else None
             if upd:
                 line.write(upd)
+            if _disc_before is not None and 'discount' not in upd and abs((line.discount or 0.0) - (_disc_before or 0.0)) > 1e-6:
+                _logger.warning("MELI #525: %s linea %s (%s): el write recomputo discount %.4f -> %.4f desde la tarifa; se restituye",
+                                line.order_id.name, line.id, line.product_id.default_code or '', _disc_before or 0.0, line.discount or 0.0)
+                line.write({'discount': _disc_before})
             if 'price_unit' in vals:
                 line._meli_enforce_ml_price(vals.get('price_unit'), config=config)
         return True
+
+    @api.model
+    def _meli_ml_line_create_vals(self, vals):
+        """[#525 SO 8152, 7-nov-2026] Vals de CREATE de una linea de producto ML.
+
+        El precio de la linea ya es el de ML (unit_price, menos la parte del vendedor). Si la tarifa
+        de la venta tiene una regla `percentage` para ese producto, Odoo 17+/18/19 la vuelca a
+        `discount` en el create (_compute_discount) y la venta queda por debajo de lo cobrado
+        (ROEN: 15 % ⇒ 700,11 vs 823,65 cobrado ⇒ "Condition not met", venta en presupuesto).
+        Se crea con discount 0; el cupon de ML (modo product_discount) lo imputa despues su bloque."""
+        vals = dict(vals)
+        if 'discount' in self._fields and 'discount' not in vals:
+            vals['discount'] = 0.0
+        return vals
 
     def _meli_enforce_ml_price(self, price_unit, config=None):
         """Si una personalizacion piso el precio de ML durante el write, se restituye."""
@@ -3120,8 +3143,13 @@ class sale_order(models.Model):
             return (True, "")
 
         # Sin pedido de venta no se puede evaluar el monto.
+        # 26.391: el motivo distingue "ML no informó el precio" de "SKU sin vincular".
+        _no_price = self._meli_items_without_price()
         if not self.order_line:
-            return (False, "Sin líneas de venta / producto no encontrado (SKU sin vincular)")
+            return (False, self._meli_no_lines_reason(_no_price))
+        if _no_price:
+            return (False, "ML no informó el precio del ítem (el SKU sí está vinculado): %s. "
+                           "Revise el precio de la línea antes de confirmar." % _no_price)
 
         amount_to_invoice = self.meli_amount_to_invoice( meli=meli, config=config )
         # coupon_amount es costo de ML, no del vendedor — el SO ya tiene el precio completo.
@@ -3173,6 +3201,32 @@ class sale_order(models.Model):
             return (False, serror)
 
         return (True, "")
+
+    def _meli_items_without_price(self):
+        """26.391: items de las ordenes ML de esta venta CON producto vinculado pero sin precio
+        informado por ML (unit_price vacio)."""
+        self.ensure_one()
+        parts = []
+        morders = 'meli_orders' in self._fields and self.meli_orders
+        for mo in (morders or []):
+            for oi in mo.order_items:
+                if oi.product_id and _meli_price_or_none(oi.unit_price) is None:
+                    parts.append("item %s SKU %s x%s" % (oi.order_item_id or '?', oi.seller_sku or '-', oi.quantity or 0))
+        return "; ".join(parts)
+
+    def _meli_no_lines_reason(self, no_price=None):
+        """26.391: motivo de "sin lineas" que distingue la causa (antes decia siempre "SKU sin vincular")."""
+        self.ensure_one()
+        no_price = no_price if no_price is not None else self._meli_items_without_price()
+        if no_price:
+            return "Sin líneas de venta: ML no informó el precio del ítem (el SKU sí está vinculado): %s" % no_price
+        missing = self._meli_items_without_product()
+        if missing:
+            return "Sin líneas de venta / producto no encontrado (SKU sin vincular): %s" % missing
+        morders = 'meli_orders' in self._fields and self.meli_orders
+        if morders and not any(mo.order_items for mo in morders):
+            return "Sin líneas de venta: ML no informó los ítems de la orden"
+        return "Sin líneas de venta / producto no encontrado (SKU sin vincular)"
 
     def _meli_items_without_product(self):
         """[26.231] Items de las ordenes ML de esta venta que no tienen producto en
@@ -3920,6 +3974,17 @@ def _meli_item_ref(Item):
         return '-'
 
 
+def _meli_price_or_none(value):
+    """26.391: precio de ML como float, o None si ML no lo informo (null, vacio, no numerico).
+    ML puede devolver una orden PAGADA con unit_price / total_amount / paid_amount = null."""
+    if value is None or value is False or value == '':
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class mercadolibre_orders(models.Model):
     _name = "mercadolibre.orders"
     _description = "Pedidos en MercadoLibre"
@@ -4630,11 +4695,42 @@ class mercadolibre_orders(models.Model):
             or ICP.get_param(self.SELLER_COUPON_MODE_PARAM) or 'discount'
         return 'collected' if str(val).strip().lower() == 'collected' else 'discount'
 
+    # 26.386 (#603 F5b Shoppy 502): tope del descuento del vendedor al CUPON de la orden (opt-in).
+    # Parametro: meli_oerp.seller_discount_cap_coupon.company_<id> o meli_oerp.seller_discount_cap_coupon
+    # ('1'/'true'/'yes'/'on' = activo; default apagado = comportamiento de la flota sin cambios).
+    # Se aplica donde se ESCRIBE discount_seller_amount (no solo en el precio de linea) para que la linea,
+    # el pack (_meli_pack_seller_discount) y meli_discount_seller_amount de la venta usen el MISMO valor:
+    # si difieren, el control de importe deja la venta sin confirmar.
+    SELLER_DISCOUNT_CAP_COUPON_PARAM = 'meli_oerp.seller_discount_cap_coupon'
+
+    @api.model
+    def _meli_seller_discount_cap_coupon(self, config=None, company=None):
+        if not company and config:
+            if getattr(config, '_name', '') == 'res.company':
+                company = config
+            elif 'company_id' in config._fields:
+                company = config.company_id
+        if not company:
+            company = ('company_id' in self._fields and self[:1].company_id) or self.env.company
+        ICP = self.env['ir.config_parameter'].sudo()
+        val = (company and ICP.get_param('%s.company_%s' % (self.SELLER_DISCOUNT_CAP_COUPON_PARAM, company.id))) \
+            or ICP.get_param(self.SELLER_DISCOUNT_CAP_COUPON_PARAM) or ''
+        return str(val).strip().lower() in ('1', 'true', 'yes', 'on')
+
     def _meli_apply_seller_coupon_mode(self, config=None):
         """En modo 'collected' deja en 0 el descuento del vendedor de la orden (no se resta del precio ni
-        del importe a facturar). En 'discount' no toca nada. Devuelve el modo."""
+        del importe a facturar). En 'discount' no toca nada, salvo el tope al cupon (26.386, opt-in).
+        Devuelve el modo."""
         mode = self._meli_seller_coupon_mode(config=config)
         if mode != 'collected':
+            if self[:1] and self._meli_seller_discount_cap_coupon(config=config):
+                for mo in self:
+                    _cap = meli_prorate.bounded_order_discount(mo.discount_seller_amount, mo.coupon_amount)
+                    if abs(_cap - float(mo.discount_seller_amount or 0.0)) > 0.005:
+                        _logger.info("MELI order %s: descuento del vendedor %.2f acotado al cupon %.2f -> %.2f "
+                                     "(seller_discount_cap_coupon)", mo.order_id, mo.discount_seller_amount or 0.0,
+                                     mo.coupon_amount or 0.0, _cap)
+                        mo.write({'discount_seller_amount': _cap})
             return mode
         for mo in self:
             vals = {}
@@ -4739,6 +4835,72 @@ class mercadolibre_orders(models.Model):
                      sorder.name, line.id, product_id, vals.get('meli_order_item_id'), vals.get('meli_order_item_variation_id'))
         return line
 
+    @api.model
+    def _meli_fill_missing_amounts(self, order_json):
+        """26.391: ML puede devolver una orden PAGADA con `total_amount`, `paid_amount` y
+        `order_items[].unit_price` = null (el pago aprobado si trae `transaction_amount`).
+
+        - Item sin precio y la orden tiene UN solo item con pago aprobado > 0: unit_price =
+          suma de transaction_amount / cantidad (marca `_meli_unit_price_from_payment`).
+        - Varios items sin precio por item: NO se inventa un reparto. Se marca
+          `_meli_unit_price_missing`: la linea se crea a precio 0 con aviso para revision.
+        - total_amount nulo: suma de unit_price*cantidad solo si todos los items tienen precio.
+        - paid_amount nulo: suma de total_paid_amount (o transaction_amount) de los pagos aprobados.
+        Solo se usan pagos de ESTA orden (un pago con otro order_id, p. ej. de un pack, se ignora).
+        Modifica el dict en el lugar y lo devuelve."""
+        if not isinstance(order_json, dict):
+            return order_json
+        items = [it for it in (order_json.get('order_items') or []) if isinstance(it, dict)]
+        oid = order_json.get('id')
+        pays = []
+        for p in (order_json.get('payments') or []):
+            if not isinstance(p, dict) or p.get('status') != 'approved':
+                continue
+            if p.get('order_id') and oid and str(p.get('order_id')) != str(oid):
+                continue
+            pays.append(p)
+        paid_tx = sum((_meli_price_or_none(p.get('transaction_amount')) or 0.0) for p in pays)
+        missing = [it for it in items if _meli_price_or_none(it.get('unit_price')) is None]
+        if missing:
+            if len(items) == 1 and paid_tx > 0.0:
+                it = items[0]
+                qty = _meli_price_or_none(it.get('quantity')) or 1.0
+                it['unit_price'] = paid_tx / qty
+                it['_meli_unit_price_from_payment'] = True
+                _logger.warning("MELI orden %s: ML no informo unit_price; se toma del pago aprobado (%.2f / %s)",
+                                oid, paid_tx, qty)
+            else:
+                for it in missing:
+                    it['_meli_unit_price_missing'] = True
+                _logger.warning("MELI orden %s: ML no informo el precio de %s item(s) de %s; no se reparte el pago "
+                                "(lineas a precio 0 para revision)", oid, len(missing), len(items))
+        if 'total_amount' in order_json and _meli_price_or_none(order_json.get('total_amount')) is None \
+                and items and all(_meli_price_or_none(it.get('unit_price')) is not None for it in items):
+            order_json['total_amount'] = sum(_meli_price_or_none(it.get('unit_price')) * (_meli_price_or_none(it.get('quantity')) or 1.0)
+                                             for it in items)
+        if 'paid_amount' in order_json and _meli_price_or_none(order_json.get('paid_amount')) is None and pays:
+            order_json['paid_amount'] = sum(
+                (_meli_price_or_none(p.get('total_paid_amount')) if _meli_price_or_none(p.get('total_paid_amount')) is not None
+                 else (_meli_price_or_none(p.get('transaction_amount')) or 0.0)) for p in pays)
+        return order_json
+
+    def _meli_note_item_price_source(self, sorder, Item, config=None):
+        """26.391: aviso visible (una vez por item) cuando ML no informo el precio del item."""
+        if not sorder or not isinstance(Item, dict):
+            return
+        _it = Item.get('item') if isinstance(Item.get('item'), dict) else {}
+        _id = _it.get('id') or '-'
+        _sku = _it.get('seller_sku') or _it.get('seller_custom_field') or '-'
+        if Item.get('_meli_unit_price_missing'):
+            msg = ("ML no informó el precio del ítem %s (SKU %s, cantidad %s): la línea se creó con precio 0. "
+                   "El producto SÍ está vinculado. Revise el precio de la línea antes de confirmar la venta.") % (
+                       _id, _sku, Item.get('quantity'))
+            meli_message_post(sorder, msg, config=config, once_key="sin-precio-ml-%s" % _id)
+        elif Item.get('_meli_unit_price_from_payment'):
+            msg = ("ML no informó el precio del ítem %s (SKU %s): se tomó del pago aprobado (%s por unidad).") % (
+                _id, _sku, Item.get('unit_price'))
+            meli_message_post(sorder, msg, config=config, once_key="precio-de-pago-ml-%s" % _id)
+
     def _meli_note_line_not_added(self, sorder, line_fields, config=None):
         """26.250 (#caso-K13 bug 6): control visible cuando la sincronización NO agrega una línea a una
         venta confirmada. Una nota por item (once_key): el usuario ve que ML informa un item que la
@@ -4800,7 +4962,18 @@ class mercadolibre_orders(models.Model):
             seller_discount = float(order.discount_seller_amount or 0)
         seller_discount = float(seller_discount or 0.0)
         _qty = float(Item['quantity'] or 1.0)
-        _gross = float(Item['unit_price']) * _qty
+        # 26.391: unit_price nulo no tumba la orden (antes: float(None) => TypeError => venta sin lineas).
+        # Sin precio de ML la linea va a 0 (nunca negativa: no se resta descuento) y queda el aviso para
+        # revision. Si el precio se derivo del pago aprobado, ya es neto: no se resta el descuento otra vez.
+        _unit = _meli_price_or_none(Item.get('unit_price') if isinstance(Item, dict) else getattr(Item, 'unit_price', None))
+        if _unit is None:
+            _logger.warning("MELI _set_product_unit_price orden %s: ML no informo el precio del item; linea a precio 0",
+                            order.order_id or '-')
+            _unit = 0.0
+            seller_discount = 0.0
+        elif isinstance(Item, dict) and Item.get('_meli_unit_price_from_payment'):
+            seller_discount = 0.0
+        _gross = _unit * _qty
         if seller_discount and items_total and float(items_total) > 0.0 and _gross < float(items_total) - 0.005:
             seller_discount = seller_discount * (_gross / float(items_total))
         # 26.229: el descuento de UN ítem nunca puede llevar su precio a cero o negativo. Si pasa,
@@ -4812,7 +4985,7 @@ class mercadolibre_orders(models.Model):
                             "(%s): NO se aplica (se factura a precio pleno)",
                             order.order_id or '-', seller_discount, _gross, _meli_item_ref(Item))
             seller_discount = 0.0
-        unit_price = float(Item['unit_price']) - float(seller_discount / _qty)
+        unit_price = max(_unit - float(seller_discount / _qty), 0.0) if _unit else 0.0
         upd_line = {
             "price_unit": ml_product_price_conversion( self, product_related_obj=product_related_obj, price=unit_price, config=config )
         }
@@ -5008,6 +5181,10 @@ class mercadolibre_orders(models.Model):
             if ((not product_related) or len(product_related)>1):
                 product_related = product_obj.search([ ('barcode','=ilike',meli_seller_sku)]
                                                         +company_domain)
+            # 26.389 (515): el mismo GTIN con otro ancho ('07502300970043' en ML, '7502300970043'
+            # en Odoo). Solo si el exacto no encontro nada, y solo con UN producto.
+            if not product_related:
+                product_related = product_obj._meli_search_by_barcode_gtin(meli_seller_sku, company_domain)
 
         if ((not product_related) or len(product_related)>1):
             if (meli_id_variation):
@@ -5258,6 +5435,9 @@ class mercadolibre_orders(models.Model):
             data["order_json"] = order_json
             #_logger.info(order_json: "+str(order_json))
 
+        # 26.391: orden PAGADA con unit_price / total_amount / paid_amount nulos (ML los devuelve asi a veces):
+        # se completan desde el pago aprobado cuando es inequivoco; si no, se marca el item sin precio.
+        order_json = self._meli_fill_missing_amounts(order_json)
         order_fields = self.prepare_ml_order_vals( order_json=order_json, meli=meli, config=config )
 
         if ( "mercadolibre_channel_mkt" in config._fields and config.mercadolibre_channel_mkt and order_fields["context"] ):
@@ -7061,9 +7241,20 @@ class mercadolibre_orders(models.Model):
                         product_related = product_obj._meli_sku_token_resolve( seller_sku, config, company_domain )
 
 
-                    #TODO: 3RD attempt using barcode
-                    #if (not product_related):
-                    #   search using item attributes GTIN and SELLER_SKU
+                    # 26.389 (515): 3er intento por CODIGO DE BARRAS. Primero el SKU como barcode
+                    # (hay vendedores que cargan el GTIN como SKU), despues el GTIN del aviso
+                    # (variacion vendida o aviso). Normalizado GTIN-8/12/13/14 y solo con UN producto.
+                    # `meli_oerp_multiple` redefine search_meli_product sin barcode: este es el unico
+                    # punto por el que pasan las ventas de los dos modulos.
+                    if (not product_related):
+                        _bc_codes = [c for c in (Item['item'].get('seller_sku'), Item['item'].get('seller_custom_field')) if c]
+                        product_related = product_obj._meli_search_by_barcode_gtin(_bc_codes, company_domain)
+                        if (not product_related and rjson3):
+                            _gtins = meli_item_gtins(rjson3, Item['item'].get('variation_id'))
+                            product_related = product_obj._meli_search_by_barcode_gtin(_gtins, company_domain)
+                        if product_related:
+                            _logger.info("Orden %s: item %s vinculado por codigo de barras -> %s",
+                                         order_json.get("id"), Item['item'].get('id'), product_related.display_name)
                     #_logger.info(2nd attempt: "+str(Item["item"]) + " seller_sku:"+str(seller_sku))
 
                     if (len(product_related)):
@@ -7358,6 +7549,7 @@ class mercadolibre_orders(models.Model):
                         except (TypeError, ValueError, AttributeError):
                             pass
                     saleorderline_item_fields.update( order._set_product_unit_price( product_related_obj=product_related_obj, Item=Item, config=config, items_total=_items_total or None ) )
+                    order._meli_note_item_price_source(sorder, Item, config=config)  # 26.391
 
                     #TODO: agregar meli_order_id !!! (mismo item dos ordenes diferentes...puede pasar...)
                     saleorderline_item_ids = saleorderline_obj.search( [('meli_order_item_id','=',saleorderline_item_fields['meli_order_item_id']),
@@ -7389,7 +7581,7 @@ class mercadolibre_orders(models.Model):
                                             sorder.name, sorder.state, saleorderline_item_fields['meli_order_item_id'], _var)
                             order._meli_note_line_not_added(sorder, saleorderline_item_fields, config=config)
                         elif sorder.meli_paid_amount==0.0 or 1.1<abs((sorder.meli_paid_amount-(sorder.meli_discount_seller_amount or 0))-sorder.amount_total):
-                            saleorderline_item_ids = saleorderline_obj.create( ( saleorderline_item_fields ))
+                            saleorderline_item_ids = saleorderline_obj.create( saleorderline_obj._meli_ml_line_create_vals( saleorderline_item_fields ) )
                     
                     if saleorderline_item_ids:
                         #_logger.info(saleorderline_item_ids:"+str(saleorderline_item_ids))
