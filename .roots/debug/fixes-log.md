@@ -4,6 +4,26 @@
 
 ---
 
+## 10 nov 2026 — 26.394: avisos de envío repetidos en el chatter (#696, 535) `[19.0]`
+**Síntoma:** cada sincronización de la venta dejaba «Sin servicio de envio o carrier.» en el chatter; «Companias Coinciden OK…» iba por `message_post` directo (ignoraba `mercadolibre_notification_mode`), salía aunque las compañías no coincidieran y su guarda recorría el chatter entero.
+**Fix:** ambos por `meli_message_post(once_key=…, legacy_text=…)`. Nuevo kwarg `legacy_text` + helper `meli_message_text_posted` (versions.py): ventas viejas con el texto sin marca no reabren la ronda. El «Monto correcto…» ya era una-vez desde 26.171.
+**Medido en prod 535 (10-nov, 7 días):** ahí los avisos YA salían una vez por venta (max 1/venta); el problema es el VOLUMEN (~3 de rutina por venta + 2 por orden ML) con modo `notification`, y `none` apagaría también los «⚠️ ACCIÓN REQUERIDA». ⇒ modo nuevo **`important`**: `meli_message_post(routine=True)` ⇒ log; lo demás ⇒ nota interna. Rutina: Coinciden OK, Monto correcto, Pack Order dont create, Sale order created / (pack), ML(stock) Almacen. Default sin cambio.
+**Prueba:** tests/test_26394_chatter_once.py (camino real `_update_sale_order_shipping_info` ×3 ⇒ 1 aviso; modo none ⇒ 0; legado; modo important ⇒ rutina 0 y lo accionable como nota). Control sin fix (19.0): 1F+3E (antes de agregar los 3 de important).
+
+---
+
+## 10 nov 2026 — 26.393: niveles ML en inglés en es_AR/es_* `[19.0]`
+**Síntoma:** «MercadoLibre Sale Reader» / «MercadoLibre Sale Manager» sin traducción en `es_AR.po` y sin `es.po` ⇒ el selector mezclaba inglés y castellano.
+**Fix:** Entradas en `es_AR.po` + `es.po` mínimo nuevo: «Lector de MercadoLibre» / «Encargado de MercadoLibre».
+**Prueba:** test_03 de meli_oerp_multiple/tests/test_26393_token_enmascarado.py (es_AR y es_MX).
+
+---
+
+## 10 nov 2026 — 26.392: grupos ML con categoría/privilegio propio, Tax Included visible, Redirect sugerida https `[19.0]`
+**Síntoma:** (pedido MINT e-learning) los grupos `group_mercadolibre_reader` / `group_mercadolibre_manager` tenían `category_id` comentado y sin `privilege_id` ⇒ «Permisos extra», sólo modo dev. `mercadolibre_tax_included` con `groups=base.group_no_one` en `views/company_view.xml`. `_meli_suggested_redirect_uri` devolvía `http://…/meli_login` si `web.base.url` es http (ML exige https).
+**Fix:** `res.groups.privilege` `res_groups_privilege_mercadolibre` «Mercado Libre» (category `base.module_category_sales`, placeholder «Sin acceso»), `sequence` 10/20/30. Lector < Encargado (`group_mercadolibre_manager` implica reader); multiple agrega el nivel Administrador. Tax Included → `base.group_system`. Helper `_meli_https_url` (http + host no local ⇒ https; no toca `web.base.url`).
+**Prueba:** `tests/test_26392_grupos_categoria.py` (meli_26392). Banco 16–20 control (origin 26.391) rojo, fix verde; upgrade origin→rama con usuarios existentes: asignaciones conservadas, sólo se suman los implicados.
+
 ## 10 nov 2026 — 26.391: orden ML pagada con unit_price / total_amount / paid_amount nulos `[19.0]`
 **Síntoma:** ML devolvió una orden PAGADA con `total_amount`, `paid_amount` y `order_items[0].unit_price` = null (el pago en `payments[]` sí traía `transaction_amount` aprobado). `_set_product_unit_price` hacía `float(Item['unit_price'])` ⇒ `TypeError` ⇒ `orders_query_iterate > Error actualizando ORDEN` ⇒ venta draft, total 0, sin líneas; cada reimport repetía. El motivo de `meli_confirm_ready` decía "producto no encontrado (SKU sin vincular)" aunque el SKU matcheaba.
 **Fix:** `mercadolibre.orders._meli_fill_missing_amounts` (antes de `prepare_ml_order_vals`): un solo ítem sin precio + pago aprobado de ESA orden ⇒ unit_price = Σtransaction_amount / qty (sin volver a restar el descuento del vendedor: el pago ya es neto); varios ítems sin precio ⇒ NO se reparte, marca `_meli_unit_price_missing` ⇒ línea a 0 + aviso `once_key` en el chatter; total/paid nulos ⇒ desde ítems/pagos. `_set_product_unit_price` tolera None (precio 0, nunca negativo). `sale.order._meli_items_without_price` / `_meli_no_lines_reason`: `meli_confirm_ready` distingue "ML no informó el precio" / "SKU sin vincular" / "ML no informó los ítems", y no confirma con líneas sin precio de ML.
