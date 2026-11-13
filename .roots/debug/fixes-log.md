@@ -2,6 +2,35 @@
 
 > Historial de correcciones implementadas.
 
+## 26.402 (13-nov-2026) — con posición fiscal, el total de la venta no cuadraba con ML
+- **Síntoma:** venta simulada en odoo19mint (Taza, 143.999 ARS): pedido 125.216,52 con «0% Exports»; chatter
+  «Condition not met: meli_paid_amount and amount_total doesn't match … diff=18782.48» ⇒ queda en presupuesto.
+- **Causa:** `ml_product_price_conversion` neteaba el unitario por los impuestos del PRODUCTO (15 %) y la línea
+  quedaba con los MAPEADOS por la posición fiscal de la venta («Foreign Trade»: 15 % → 0 %). Mismo camino en el flete.
+  Disparador en la demo: compañía con partner AR y país fiscal US (plan genérico) ⇒ todo comprador AR es «extranjero».
+- **Fix:** `models/versions.py:meli_predict_line_taxes` reproduce el impuesto final de la línea (map de la FP +
+  regla de `_meli_sync_line_taxes`: IVA de la publicación gana, mapeo vacío ⇒ vuelven los del producto; envío = sólo
+  map) y `ml_product_price_conversion(taxes=…)` netea por ése. Llamadores: `_set_product_unit_price(sale_order,
+  iva_name)` en orders.py y pack de shipment.py; flete en shipment.py. Sin posición fiscal: idéntico.
+- **Test:** `tests/test_26402_neteo_posicion_fiscal.py` (tag `meli_26402_neteo_fp`, 6). Control con los llamadores
+  viejos: «1000.0 != 1150.0». Verificado en odoo19mint 19.1.26.402: «ML 9000000000001101» total 143.999.
+
+---
+
+## 13 nov 2026 — 26.400: modo SIMULACIÓN de ventas de ML (demo/test/soporte) `[16.0–20.0]`
+**Pedido:** FCA vía MINT (e-learning video 06 «Importar una venta»): simular ventas con JSON de ventas reales, manejado por OCAPI. Plan: `.roots/tasks/PLAN-2026-11-13-meli-modo-simulacion-ordenes.md` (workspace).
+**Diseño:** `models/meli_sim_client.py` — `MeliSimClient` (interfaz de MeliApiNoSDK: GET desde el bundle, POST/PUT/DELETE/upload ⇒ no salen, 403 «meli_simulation» + `blocked`; ruta faltante ⇒ `{}` + `missing`; `fallback_real_reads` sólo GET). Activo en un **thread-local** ⇒ `meli.util.get_new_instance` (base y multiple) devuelve el simulado (el import crea clientes nuevos en ~200 lugares). Guarda perezosa en `requests.adapters.HTTPAdapter.send` y `urllib3 HTTPConnectionPool.urlopen`, sólo en el hilo que simula y sólo hosts ML/MP: MercadoPago (`requests.get` directo) sale del bundle. `models/meli_sim.py`: interruptor `res.company.meli_simulation_enabled` (default False, group_system), `mercadolibre.orders.meli_simulated/meli_sim_bundle/meli_sim_log`, `sale.order.meli_simulated`, entrada `meli_simulate_order(bundle, config)`, re-sync de simuladas desde su bundle (`orders_update_order`, `update_order_status`, dominio de `orders_resync_status`), asistente `mercadolibre.orders.simulate`. Rehúsa: interruptor apagado, no-admin, `order_id` de una orden REAL.
+**Prueba:** `tests/test_meli_simulacion.py` (tag `meli_simulacion`, 7) + multiple 3: «sin red» medido con patch de `socket`. Banco 16/17/18/19/20 10/10; suite completa 19 fix vs ctl: mismo único error preexistente (k02 test_03, ruta de migración del banco).
+**Ojo tests Odoo 17+:** el framework bloquea `requests.Session.send` ARRIBA de la guarda ⇒ los tests redefinen `_request_handler` para bajar al adapter.
+
+---
+
+## 12 nov 2026 — 853de3e7 (sin bump, sólo Python): selector de privilegios en inglés con usuario es_AR `[19.0]`
+**Síntoma:** en odoo19mint (core 19.1a1) la ficha de usuario mostraba secciones, privilegio «Mercado Libre» y niveles en inglés («MercadoLibre Sale Reader/Manager», «SALES») aunque la base tiene es_AR (el fix 26.393 SÍ estaba cargado).
+**Causa (core, no el .po):** `res.groups._get_view_group_hierarchy` del 19.1a1 está decorado `@ormcache(cache='groups')` **sin `self.env.lang`** en la clave (19.0 estable y 20.0 lo tienen). El primer idioma que lo calcula tras restart/limpieza queda servido a todos; un cron/usuario en_US lo llena en inglés. Reproducido en shell: en_US→es_AR devuelve inglés; tras limpiar el cache y entrar primero en es_AR, en_US salía en castellano.
+**Fix:** `models/res_groups.py`: override guardado — si la clave del ormcache del core no menciona `lang` (`__cache__.args`), re-cachea por idioma (`_meli_view_group_hierarchy_por_idioma`, mismo cache `groups`) llamando al cuerpo crudo del core (`__cache__.method`). En cores sanos devuelve `super()` (no-op). 20.0 no lo necesita.
+**Prueba:** odoo19mint (ef39a7f32 en moldeomint `claude/meli19-demo-26394`): RPC en_US→es_AR→en_US tras restart y tras limpiar el cache ⇒ cada idioma lo suyo; en pantalla (admin es_AR): «VENTAS · Mercado Libre: Administrador de MercadoLibre».
+
 ---
 
 ## 10 nov 2026 — 26.394: avisos de envío repetidos en el chatter (#696, 535) `[19.0]`
@@ -1963,3 +1992,12 @@ Fix 5/5 en 16-19; control origin 26.333 en 18: 5 FAIL de 5. Suites /meli_oerp,/m
 - Tests: tests/test_26367_pack_split_gemela_legacy.py (tag meli_26367, 6). Control origin 26.363: 2F/6.
 - Relacionado: en 16.0 prod 502 corría 26.239 SIN 26.229 `_meli_pack_sync_cancelled` (carrito de ≥2 órdenes canceladas
   quedaba meli_status=paid ⇒ sin camino de cancelación ni guarda de factura #148). Ya está en origin desde 26.229.
+
+## 26.401 (13-nov-2026) — un 4xx/5xx sin clave «error» se leía como éxito
+- **Síntoma:** en una instancia nuestra (cuenta con token muerto) cientos de `PUT /items … 401 invalid access token`
+  en una semana y el cron de precio reportando cada corrida «success» con N publicaciones OK.
+- **Causa:** ML manda el 401 como `{"code": "unauthorized", "message": "invalid access token"}`, sin `error`.
+  Todos los llamadores deciden con `"error" in rjson` ⇒ el rechazo pasaba como publicado.
+- **Fix:** `models/meli_util.py:MeliApiNoSDK._parse_response` — todo dict de un status >= 400 sale con
+  `error` (el `code` de ML o `http_<status>`) y `status`. El caso «body vacío» (4-ago) queda igual.
+- **Test:** `tests/test_put_rechazado_no_es_exito.py` (tag `meli_put_rechazado`).

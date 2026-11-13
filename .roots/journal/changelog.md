@@ -4,6 +4,23 @@
 
 ---
 
+## 19.0.26.402 — 13-nov-2026 · El total de la venta coincide con Mercado Libre aunque la venta tenga posición fiscal
+- Cuando la venta lleva una **posición fiscal que cambia el IVA del producto** (exento, exportación, zona franca, «Foreign Trade» → «0% Exports»), el precio de Mercado Libre se netea ahora por el impuesto que la línea **lleva de verdad**. Antes se descontaba el IVA del producto y se aplicaba el de la posición fiscal: el pedido quedaba por debajo de lo cobrado (ej. 125.216,52 contra 143.999) y no se confirmaba («Condition not met»). Vale para la línea del producto y para la del envío. Sin posición fiscal, nada cambia.
+
+---
+
+## 19.0.26.401 — 13-nov-2026 · Un rechazo de Mercado Libre ya no se lee como «publicado»
+- Cuando Mercado Libre rechaza una escritura (precio, stock, publicación) con un código de error que **no** trae el campo `error` —por ejemplo el token vencido: `401 invalid access token`—, ahora se trata como **error**. Antes ese rechazo se contaba como publicado y los contadores de los crons decían «OK».
+
+---
+
+## 19.0.26.400 — 13-nov-2026 · Simular ventas de Mercado Libre (bases de demostración y de prueba)
+- Nuevo **modo simulación**: en una base de demo o de prueba se puede importar una venta de Mercado Libre a partir de un JSON, sin que la venta exista en Mercado Libre. Entra por el mismo camino que una venta real (cliente, pedido, pagos, envío) y queda marcada **«SIMULADA»** (cinta en la venta y en la orden ML, filtro «Simuladas»).
+- Mercado Libre **no recibe ninguna escritura** desde una venta simulada: ni mensajes, ni factura, ni cambios de publicación. «Actualizar» una simulada vuelve a leer su JSON, nunca a Mercado Libre.
+- Se habilita por compañía en **Compañía › MercadoLibre › Simulación de ventas** (sólo administradores, **apagado** por defecto). Con el interruptor encendido aparece el botón **«Simular venta»**.
+
+---
+
 ## 19.0.26.394 — 10-nov-2026 · Menos avisos repetidos de sincronización en el chatter de la venta
 - «Companias Coinciden OK…» y «Sin servicio de envio o carrier.» se anotan **una sola vez por venta** (antes, el segundo en cada sincronización) y respetan el ajuste **Modo de notificación** de Mercado Libre (con «Ninguno» van sólo al registro del servidor).
 - «Companias Coinciden OK» ya no se anota cuando las compañías no coinciden.
