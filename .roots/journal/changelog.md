@@ -1,6 +1,21 @@
 # meli_oerp - Changelog
 
+## 19.0.26.416 — 17-nov-2026 · Release de flota 26.416
+- Sin cambios propios en este módulo: acompaña la versión 26.416 del suite (meli_oerp_accounting: en un pack partido por Mercado Libre, la comisión y el envío del pago original ya no quedan vigentes junto a los del pedido nuevo).
+
+---
+
 > Historial de versiones y cambios orientado al cliente.
+
+---
+
+## 19.0.26.415 — 17-nov-2026 · Release de flota 26.415
+- Sin cambios propios en este módulo: acompaña la versión 26.415 del suite (meli_oerp_accounting: reintegros parciales con el pago aprobado y desglose de comisión y financiación en cuotas, ambos opcionales y apagados por defecto).
+
+---
+
+## 19.0.26.414 — 17-nov-2026 · Release de flota 26.414
+- Sin cambios propios en este módulo: acompaña la versión 26.414 del suite (meli_oerp_multiple: el import de ventas usa la vinculación existente antes de crear un producto, análisis de estado en ML de a 20, estado de las variantes desde las vinculaciones y acción de precio ML → Odoo).
 
 ---
 
