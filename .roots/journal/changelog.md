@@ -1,5 +1,25 @@
 # meli_oerp - Changelog
 
+## 19.0.26.422 — 19-nov-2026 · Release de flota 26.422
+- Sin cambios propios en este módulo: acompaña la versión 26.422 del suite (meli_oerp_multiple: los crons de stock y precio ya no reintentan publicaciones cerradas, eliminadas o inexistentes en Mercado Libre; «Analizar estado real en ML» actualiza el SKU de la vinculación con el de ML; las acciones «Desvincular …» permiten previsualizar antes de eliminar, sin tocar el producto).
+
+---
+
+## 19.0.26.421 — 19-nov-2026 · Release de flota 26.421
+- Sin cambios propios en este módulo: acompaña la versión 26.421 del suite (meli_oerp_accounting: las facturas de servicios de Mercado Libre México —CFDI— entran solas por la API de facturación de Mercado Libre, con el mismo proceso del importador manual; se activa en la pestaña Mercado Libre de la compañía).
+
+---
+
+## 19.0.26.419 — 18-nov-2026 · Release de flota 26.419
+- Sin cambios propios en este módulo: acompaña la versión 26.419 del suite (meli_oerp_accounting: importación de las facturas de servicios de Mercado Libre México —CFDI XML/ZIP— a Cuentas por Pagar, sin duplicados, con cuenta por clave SAT y conciliación con los pagos a Mercado Libre por venta).
+
+---
+
+## 19.0.26.417 — 18-nov-2026 · Release de flota 26.417
+- Sin cambios propios en este módulo: acompaña la versión 26.417 del suite (meli_oerp_accounting: pedidos partidos protegidos antes de anular, reintegros parciales por fecha del reintegro y pago de financiación separado opcional, apagado por defecto).
+
+---
+
 ## 19.0.26.416 — 17-nov-2026 · Release de flota 26.416
 - Sin cambios propios en este módulo: acompaña la versión 26.416 del suite (meli_oerp_accounting: en un pack partido por Mercado Libre, la comisión y el envío del pago original ya no quedan vigentes junto a los del pedido nuevo).
 
