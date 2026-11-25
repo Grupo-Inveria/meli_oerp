@@ -1,5 +1,31 @@
 # meli_oerp - Changelog
 
+## 19.0.26.450 — 25-nov-2026 · «Envío ML» en la factura impresa
+- La factura impresa muestra «Envío ML: <número>» debajo del bloque de información cuando viene de una venta de
+  Mercado Libre con envío (Mercado Libre imprime en la etiqueta el número de ENVÍO, no el de venta: así se cruzan a
+  simple vista). Sobrevive a localizaciones que reemplazan ese bloque (l10n_ar). Facturas sin envío ML: sin cambios.
+  Origen: pedido de un cliente, probado en su base; template `report/report_invoice_meli_shipping.xml`.
+- Acompaña meli_oerp_multiple 26.450 (seguridad: `/ocapi/mercadolibre/status` por lista cerrada de campos, nunca
+  tokens ni claves).
+
+---
+
+## 19.0.26.449 — 25-nov-2026 · Release de flota 26.449
+- Sin cambios propios en este módulo: acompaña la versión 26.449 del suite (meli_oerp_multiple: con «User Product Seller» prendido, «Actualizar» una publicación que ya tiene variaciones en Mercado Libre ya no corta con `KeyError: 'title'`; la actualización de las variaciones va con el título).
+
+---
+
+## 19.0.26.447 — 25-nov-2026 · Release de flota 26.447
+- Sin cambios propios en este módulo: acompaña la versión 26.447 del suite (meli_oerp_stock: nuevo «Tope de cantidad publicada» por producto y por variante — con N > 0 Odoo publica en Mercado Libre como máximo N unidades aunque haya más; 0 = sin tope, igual que antes. Reemplaza en la práctica a «Max Compra», que Mercado Libre dejó de aplicar el 30-oct-2026.)
+
+---
+
+## 19.0.26.445 — 24-nov-2026 · Nombre de familia «None» en publicaciones nuevas
+- Al importar una publicación que en Mercado Libre no tiene nombre de familia, Odoo guardaba el texto «None». Al publicar después un producto con ese dato, Mercado Libre armaba el título «None <Color> <Talle>» y pausaba la publicación por infracción. Ahora un nombre de familia vacío (o con el texto «None» / «False») se trata como vacío: al publicar se usa el título o el nombre del producto. La actualización limpia esos textos en productos y variantes. Las publicaciones ya creadas en Mercado Libre no cambian (ML no deja modificar el nombre de familia de un ítem existente).
+- La importación de una publicación ya no se corta entera si falla el cálculo del precio (queda en 0 y sigue).
+
+---
+
 ## 19.0.26.444 — 24-nov-2026 · MLM: factura al comprador con RFC propio
 - Mercado Libre México: cuando el comprador cargó en Mercado Libre un RFC propio, la venta y la factura van a su contacto fiscal (razón social, RFC, código postal, régimen y uso de CFDI informados por ML) aunque la cuenta tenga un «Contacto de Facturación Predeterminado» (p. ej. MERCADO LIBRE FULL); con RFC genérico (XAXX010101000 / XEXX010101000) o sin RFC se usa el predeterminado como siempre y el uso de CFDI queda en S01 (nunca XAXX con G03/G01, que el PAC rechaza con CFDI40161). Vale también para los carritos (pack). Ventas ya facturadas no cambian de contacto. Opción «México: facturar al comprador con RFC propio», prendida por defecto; apagada = comportamiento anterior. El régimen y uso de ML se escriben en el contacto fiscal del comprador también cuando la factura queda en el predeterminado (antes se intentaba sobre el predeterminado, bloqueado, y no se escribía nada).
 
